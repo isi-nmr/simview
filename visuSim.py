@@ -1,7 +1,3 @@
-import gc
-import json
-import os
-import shutil
 import sys
 from pathlib import Path
 from simUtils import readGrads, readRFEvents
@@ -11,24 +7,11 @@ from PyQt6 import QtWidgets, uic
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QApplication,
-    QHBoxLayout,
     QMainWindow,
 )
 
 
 class GUIapp(QMainWindow):
-    studyPath = ""
-    dataPath = ""
-    outputPath = ""
-    window = []
-    data = []
-    imRange = None
-    ImageViewer = []
-    overrideData = []
-    ROIsetObjects = []
-    app = []
-    polyList = []
-    currentOutPath = ""
 
     windowWidth = 1e-2
     sliderScaler = 1
@@ -162,18 +145,14 @@ class GUIapp(QMainWindow):
         layout.addLayout(buttonLayout)
         layout.addWidget(self.tSlider)
 
-        # self.hSliderLayout = QHBoxLayout()
+
 
         self.imageLayout.insertLayout(3, layout)
 
-        # self.hSliderLayout.addWidget(self.jumpNButton)
-        # self.hSliderLayout.addWidget(self.tSlider)
-        # self.hSliderLayout.addWidget(self.jumpPButton)
 
-        self.doneBtn.clicked.connect(self.donePress)
 
         self.loadData()
-        # Setup table
+
 
     def zoomIn(self):
         self.windowWidth *= 0.8
@@ -194,7 +173,7 @@ class GUIapp(QMainWindow):
             | QtWidgets.QMessageBox.StandardButton.No
         )  # Add Yes and No buttons
 
-        # Execute the message box and capture the user's choice
+
         user_choice = msg_box.exec()
 
         return user_choice == QtWidgets.QMessageBox.StandardButton.Yes
@@ -213,9 +192,6 @@ class GUIapp(QMainWindow):
         )  # Add standard buttons
         msg_box.exec()  # Display the message box
 
-    def donePress(self):
-        self.saveOverrides(self.currentOutPath)
-        QApplication.instance().quit()
 
     def changeXRange(self):
         self.tPos = self.tSlider.value() * self.sliderScaler
@@ -283,20 +259,7 @@ class GUIapp(QMainWindow):
         self.tSlider.setValue(int(self.tPos / self.sliderScaler))
 
 
-def runApp(studyPath, outputPath, config=None):
-    # try:
-    if config is None:
-        config = {"TR": 8}
-    app = QApplication(sys.argv)
-    main_window = GUIapp(studyPath, outputPath, config)
-    main_window.show()
-    app.exec()
-    # except Exception as e:
-    #     print(e)
-    # finally:
-    #     del main_window
-    del app
-    gc.collect()
+
 
 
 if __name__ == "__main__":
@@ -307,8 +270,3 @@ if __name__ == "__main__":
     gui.show()
     sys.exit(app.exec())
 
-    # if len(sys.argv) < 4:
-    #     GUIapp(
-    #         "/mnt/c/Users/vitou/Documents/mrScanSim/")
-    # else:
-    #     GUIapp(sys.argv[1])
