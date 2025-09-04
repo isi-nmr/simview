@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+    <class>MainWindow</class>
+    <widget class="QMainWindow" name="MainWindow">
+        <property name="geometry">
+            <rect>
+                <x>0</x>
+                <y>0</y>
+                <width>1142</width>
+                <height>814</height>
+            </rect>
+        </property>
+        <property name="windowTitle">
+            <string>Selector</string>
+        </property>
+
+        <widget class="QWidget" name="centralwidget">
+            <property name="autoFillBackground">
+                <bool>true</bool>
+            </property>
+            <layout class="QHBoxLayout" name="horizontalLayout_3">
+                <item>
+                    <layout class="QHBoxLayout" name="horizontalLayout_2" stretch="0,10">
+                        <property name="spacing">
+                            <number>4</number>
+                        </property>
+                        <item>
+                            <layout class="QVBoxLayout" name="imageLayout" stretch="0">
+                                <item>
+                                    <layout class="QHBoxLayout" name="horizontalLayout">
+                                        <item>
+                                            <widget class="QPushButton" name="doneBtn">
+                                                <property name="text">
+                                                    <string>Done</string>
+                                                </property>
+                                            </widget>
+                                        </item>
+                                    </layout>
+                                </item>
+                            </layout>
+                        </item>
+                    </layout>
+                </item>
+            </layout>
+        </widget>
+        <widget class="QStatusBar" name="statusbar" />
+    </widget>
+    <resources />
+    <connections />
+</ui>
