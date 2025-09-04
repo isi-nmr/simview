@@ -255,10 +255,14 @@ class GUIapp(QMainWindow):
 
         if progress.wasCanceled():
             return
-        self.RFTime, self.TxEv, self.RxTime, self.RxEv, self.TxPTime, self.TxPEv = (
+        self.RFTime, self.TxEv, self.RxTime, self.RxEv, self.TxPTime, self.TxPEv,info = (
             readRFEvents(self.dataPath)
         )
-
+        self.info = info
+        
+        self.setWindowTitle(f"{self.dataPath} originPPG: {info["pulProg"]}") 
+        
+        
         if progress.wasCanceled():
             return
         progress.setValue(40)

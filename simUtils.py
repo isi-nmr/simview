@@ -51,7 +51,8 @@ def getRFEvents(dict):
     timeTxP= np.zeros_like(time)
     TxPs = np.zeros((2,len(dict["pulseprogram"]["ev"])))
     
-    
+    info={}
+    info["pulProg"] = dict["pulseprogram"]["@path"].split("/")[-1]
     
     for event in dict["pulseprogram"]["ev"]:
         if ("@g" not in event or "@p0" not in event) and "@nco" not in event and "@p1" not in event and "@pw" not in event:
@@ -70,10 +71,7 @@ def getRFEvents(dict):
                 timeRx[indRx] = float(event["@t"])*tUnit
                 rxs[0,indRx] = 0
                 indRx+=1
-                             
-                
                 continue    
-            
             
             
         if "@pw" in event and "@p1" in event:
@@ -94,14 +92,14 @@ def getRFEvents(dict):
         rfs[:,indTx] = [float(event["@p0"]),float(event["@am"])]
         indTx=indTx+1
 
-    return time[:indTx],rfs[:,:indTx], timeRx[:indRx],rxs[:,:indRx],timeTxP[:indTxP],TxPs[:,:indTxP]
+    return time[:indTx],rfs[:,:indTx], timeRx[:indRx],rxs[:,:indRx],timeTxP[:indTxP],TxPs[:,:indTxP],info
 
 def readRFEvents(path):
     
     with open(path+"/"+"_FCube1.xml") as f:
         gCube = xmltodict.parse(f.read())
 
-    time,TxEvents,rxTime,RxEvents,TxPTime,TxPs =  getRFEvents(gCube)
+    time,TxEvents,rxTime,RxEvents,TxPTime,TxPs,info =  getRFEvents(gCube)
     
     
-    return time, TxEvents,rxTime,RxEvents,TxPTime,TxPs
+    return time, TxEvents,rxTime,RxEvents,TxPTime,TxPs,info
