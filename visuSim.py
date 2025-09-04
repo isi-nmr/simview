@@ -3,16 +3,16 @@ from pathlib import Path
 from simUtils import readGrads, readRFEvents
 import numpy as np
 import pyqtgraph as pg
-from PyQt6 import QtWidgets, uic
-from PyQt6.QtCore import Qt
+from PyQt6 import QtWidgets, uic, QtGui
+from PyQt6.QtCore import Qt, QSettings, QDir, QCoreApplication
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
 )
+import os
 
 
 class GUIapp(QMainWindow):
-
     windowWidth = 1e-2
     sliderScaler = 1
 
@@ -57,7 +57,7 @@ class GUIapp(QMainWindow):
         self.time = []
         self.navigatorH = []
         self.navigatorB = []
-        self.tPos = self.windowWidth*0.5
+        self.tPos = self.windowWidth * 0.5
 
         self.lineGx = self.plotGrads.plot(
             self.time, self.navigatorH, name="Gx", pen=penG
@@ -145,14 +145,41 @@ class GUIapp(QMainWindow):
         layout.addLayout(buttonLayout)
         layout.addWidget(self.tSlider)
 
-
-
         self.imageLayout.insertLayout(3, layout)
 
+        # Menu bar
+        menubar = self.menuBar()
+        fileMenu = menubar.addMenu("File")
 
+        # Add "Open Folder" action
+        openFolderAction = QtGui.QAction("Open Folder", self)
+        openFolderAction.triggered.connect(self.open_folder)
+        fileMenu.addAction(openFolderAction)
 
-        self.loadData()
+        # Create settings object
+        self.settings = QSettings("MR_ISIBrno", "BrukerSimView")
 
+        # Read a value (with a default)
+        self.dataPath = self.settings.value("lastFolder", QDir.homePath())
+
+    def open_folder(self):
+        folder_path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Analysis Folder", self.dataPath
+        )
+        if folder_path:
+            self.dataPath = folder_path
+
+            if not os.path.exists(self.dataPath + "/" + "_GCube.xml"):
+                self.showErrorMessage("No GCube file found in folder!")
+                return
+
+            if not os.path.exists(self.dataPath + "/" + "_FCube1.xml"):
+                self.showErrorMessage("No GCube file found in folder!")
+                return
+
+            self.settings.setValue("lastFolder", self.dataPath)
+
+            self.loadData()
 
     def zoomIn(self):
         self.windowWidth *= 0.8
@@ -173,7 +200,6 @@ class GUIapp(QMainWindow):
             | QtWidgets.QMessageBox.StandardButton.No
         )  # Add Yes and No buttons
 
-
         user_choice = msg_box.exec()
 
         return user_choice == QtWidgets.QMessageBox.StandardButton.Yes
@@ -192,18 +218,17 @@ class GUIapp(QMainWindow):
         )  # Add standard buttons
         msg_box.exec()  # Display the message box
 
-
     def changeXRange(self):
         self.tPos = self.tSlider.value() * self.sliderScaler
         self.updateView()
 
     def jumpXPos(self):
-        self.tPos = np.minimum(self.tMax,self.tPos + self.windowWidth * 0.5)
+        self.tPos = np.minimum(self.tMax, self.tPos + self.windowWidth * 0.5)
         self.tSlider.setValue(int(self.tPos / self.sliderScaler))
         self.updateView()
 
     def jumpXNeg(self):
-        self.tPos = np.maximum(self.tMin,self.tPos - self.windowWidth * 0.5)
+        self.tPos = np.maximum(self.tMin, self.tPos - self.windowWidth * 0.5)
         self.tSlider.setValue(int(self.tPos / self.sliderScaler))
         self.updateView()
 
@@ -216,16 +241,43 @@ class GUIapp(QMainWindow):
         self.phasePlot.setXRange(rangeNeg, rangePos)
 
     def loadData(self):
+        progress = QtWidgets.QProgressDialog(
+            "Parsing simulation data ...", "Cancel", 0, 100, self
+        )
+        progress.setWindowTitle("Please Wait")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)  # show immediately
+        progress.show()
+        progress.setValue(5)
+        QCoreApplication.processEvents()
+
+        progress.setLabelText("Reading RF Events")
+
+        if progress.wasCanceled():
+            return
         self.RFTime, self.TxEv, self.RxTime, self.RxEv, self.TxPTime, self.TxPEv = (
             readRFEvents(self.dataPath)
         )
+
+        if progress.wasCanceled():
+            return
+        progress.setValue(40)
+        progress.setLabelText("Reading gradients")
+
         self.gradTime, self.grads = readGrads(self.dataPath)
+
+        progress.setValue(50)
+
+        progress.setLabelText("Preparing plots gradients")
 
         self.tMax = np.max([self.RFTime[-1], self.RxTime[-1], self.TxPTime[-1]])
         self.tMin = 0
         self.sliderScaler = self.tMax / self.tSlider.maximum()
 
         self.initPlots()
+        progress.setValue(90)
+        progress.close()
+        QtWidgets.QMessageBox.information(self, "Done", "Loading finished!")
 
     def makeStepArrs(self, tArr, multArr):
         stepTime = np.repeat(tArr, 2)[1:]
@@ -259,9 +311,6 @@ class GUIapp(QMainWindow):
         self.tSlider.setValue(int(self.tPos / self.sliderScaler))
 
 
-
-
-
 if __name__ == "__main__":
     inputArgs = sys.argv
 
@@ -269,4 +318,3 @@ if __name__ == "__main__":
     gui = GUIapp("/mnt/c/Users/vitou/Documents/mrScanSim/")  # ✅ Now it's safe
     gui.show()
     sys.exit(app.exec())
-
