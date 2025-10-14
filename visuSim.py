@@ -50,15 +50,22 @@ class GUIapp(QMainWindow):
         vb.setMouseEnabled(x=False, y=True)
         # vb.setLimits(xMin=0, xMax=10)  # restrict horizontal panning
 
-        penR = pg.mkPen(color=(200, 0, 0))
-        penG = pg.mkPen(color=(0, 200, 0))
-        penB = pg.mkPen(color=(0, 0, 200))
+        penR = pg.mkPen(color=(200, 0, 0),width=1.5)
+        penG = pg.mkPen(color=(0, 200, 0),width=1.5)
+        penB = pg.mkPen(color=(0, 0, 200),width=1.5)
 
         self.time = []
         self.navigatorH = []
         self.navigatorB = []
         self.tPos = self.windowWidth * 0.5
 
+        self.plotGrads.setLabel('left', 'Gradients') 
+        self.plotRF.setLabel('left', 'RF Amp + Rx') 
+        self.phasePlot.setLabel('left', 'RF Phase') 
+        self.phasePlot.setYRange(0, 360)
+        self.plotGrads.setLabel('bottom', 'Time (s)')
+        self.plotGrads.addLegend(offset=(10, 10))
+        
         self.lineGx = self.plotGrads.plot(
             self.time, self.navigatorH, name="Gx", pen=penG
         )
@@ -76,7 +83,7 @@ class GUIapp(QMainWindow):
             self.time, self.navigatorH, name="RFP", pen=penG
         )
 
-        self.lineRx = self.plotRF.plot(self.time, self.navigatorH, name="Rx", pen=penB)
+        self.lineRx = self.plotRF.plot(self.time, self.navigatorH, name="Rx", pen=penG)
 
         self.lineTxPh = self.phasePlot.plot(
             self.time, self.navigatorH, name="Tx Phase", pen=penR
@@ -239,6 +246,7 @@ class GUIapp(QMainWindow):
         self.plotRF.setXRange(rangeNeg, rangePos)
         self.plotGrads.setXRange(rangeNeg, rangePos)
         self.phasePlot.setXRange(rangeNeg, rangePos)
+        
 
     def loadData(self):
         progress = QtWidgets.QProgressDialog(
