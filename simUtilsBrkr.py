@@ -1,6 +1,6 @@
 import xmltodict
 import numpy as np
-
+import re
 
 def getGradEvents(dict):
     time = np.zeros((len(dict["pulseprogram"]["ev"])))
@@ -177,3 +177,116 @@ def readRFEvents(path):
     ncos, info = getRFEvents(gCube)
 
     return ncos, info
+
+
+
+
+def readBrkrChannels(path,progress,app):
+    progress.setLabelText("Reading RF Events")
+
+    if progress.wasCanceled():
+        return
+    
+    ncos, info = readRFEvents(path)
+
+
+    app.setWindowTitle(f"{path} originPPG: {info['pulProg']}")
+
+    if progress.wasCanceled():
+        return
+    progress.setValue(40)
+    progress.setLabelText("Reading gradients")
+
+    gradTime, grads = readGrads(path)
+
+    progress.setValue(50)
+
+    progress.setLabelText("Preparing plots gradients")
+    
+    
+    channels = []
+    
+    for nco in ncos:
+        for key in ncos[nco]:
+            if key == "t" or key == "sf":
+                continue
+
+            if re.match(r"p\d", key):
+                plotType = "phase"
+            elif key == "pw":
+                plotType = "power"
+            else:
+                plotType = "mag"
+
+            channelDes = {
+                "label": "NCO_" + nco + "_" + key,
+                "type": "NCO",
+                "ind": nco,
+                "key": key,
+                "plotType": plotType,
+                "t": ncos[nco]["t"],
+                "data": ncos[nco][key],
+            }
+            
+            channelDes["annotations"]=[]
+            
+            if key =="am":
+                sf = ncos[nco]["sf"]
+                t = ncos[nco]["t"]
+
+                # Compute differences to find where frequency changes
+                dsf = sf - sf[np.where(sf>0)[0][0]]
+
+                whenChange = np.abs(np.diff(dsf, prepend=0)) > 0
+
+                # Extract change values and corresponding time points
+                sfChanges = dsf[whenChange]
+                tsfChanges = t[whenChange]
+                if len(sfChanges>0):
+                    channelDes["annotations"].append({"name":"sf","t":tsfChanges,"vals":sfChanges*1e3,"units":"kHz"})
+
+
+                
+            
+            channels.append(channelDes)
+
+    channels.append(
+        {
+            "label": "grads_1_Gx",
+            "type": "grads",
+            "ind": str(0),
+            "key": "Gx",
+            "plotType": "mag",
+            "t": gradTime,
+            "data": grads[0],
+            "annotations":[]
+        }
+    )
+
+    channels.append(
+        {
+            "label": "grads_2_Gy",
+            "type": "grads",
+            "ind": str(1),
+            "key": "Gy",
+            "plotType": "mag",
+            "t": gradTime,
+            "data": grads[1],
+                "annotations":[]
+        }
+    )
+    channels.append(
+        {
+            "label": "grads_3_Gz",
+            "type": "grads",
+            "ind": str(2),
+            "key": "Gz",
+            "plotType": "mag",
+            "t": gradTime,
+            "data": grads[2],
+                "annotations":[]
+        }
+    )
+
+    
+    return channels

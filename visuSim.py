@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
-from simUtils import readGrads, readRFEvents
+from simUtilsBrkr import readBrkrChannels
+from simUtilsNMRScopeB import readNMRScopeBChannels
 import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtWidgets, uic, QtGui
@@ -10,7 +11,6 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout
 import os
 
 from mulitPlotCursor import CursorPlot
-import re
 
 
 class GUIapp(QMainWindow):
@@ -21,8 +21,6 @@ class GUIapp(QMainWindow):
     plots = []
     channels = []
     checkBoxes = []
-    displayChannels = []
-    plotGroups = []
     plotContainers = []
 
     def __init__(self, simPath=None):
@@ -34,10 +32,6 @@ class GUIapp(QMainWindow):
         self.setMouseTracking(True)
 
         self.tPos = self.windowWidth * 0.5
-
-        # self.plotGrads.setBackground("w")
-        # self.plotRF.setBackground("w")
-        # self.phasePlot.setBackground("w")
 
         self.tSlider = QtWidgets.QSlider(Qt.Orientation.Horizontal)
 
@@ -119,11 +113,16 @@ class GUIapp(QMainWindow):
 
     def open_folder(self):
         folder_path = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Select Analysis Folder", self.dataPath
+            self, "Select Simulation output folder", self.dataPath
         )
         if folder_path:
             self.dataPath = folder_path
-
+            if os.path.exists(self.dataPath + "/" + "pulse_seq.json"):
+                # NMRScopeBPath
+                self.settings.setValue("lastFolder", self.dataPath)
+                self.loadData()
+                return
+            
             if not os.path.exists(self.dataPath + "/" + "_GCube.xml"):
                 self.showErrorMessage("No GCube file found in folder!")
                 return
@@ -195,11 +194,10 @@ class GUIapp(QMainWindow):
             plot.setXRange(rangeNeg, rangePos)
 
     def loadData(self):
-        self.plotGroups = []
         self.plots = []
         self.checkBoxes = []
         self.channels = []
-        self.displayChannels = []
+
 
         progress = QtWidgets.QProgressDialog(
             "Parsing simulation data ...", "Cancel", 0, 100, self
@@ -211,114 +209,17 @@ class GUIapp(QMainWindow):
         progress.setValue(5)
         QCoreApplication.processEvents()
 
-        progress.setLabelText("Reading RF Events")
+        if os.path.exists(self.dataPath + "/" + "pulse_seq.json"):
+            self.channels = readNMRScopeBChannels(self.dataPath, progress, self)        
+        else:
+            self.channels = readBrkrChannels(self.dataPath, progress, self)
+        
+        self.tMax = 0
+        for channel in self.channels:
+            self.tMax = np.maximum(self.tMax, channel["t"][-1].item())
 
-        if progress.wasCanceled():
-            return
-        self.ncos, info = readRFEvents(self.dataPath)
-        self.info = info
-
-        self.setWindowTitle(f"{self.dataPath} originPPG: {info['pulProg']}")
-
-        if progress.wasCanceled():
-            return
-        progress.setValue(40)
-        progress.setLabelText("Reading gradients")
-
-        self.gradTime, self.grads = readGrads(self.dataPath)
-
-        progress.setValue(50)
-
-        progress.setLabelText("Preparing plots gradients")
-
-        self.tMax = np.max([self.ncos["1"]["t"][-1]])
         self.tMin = 0
         self.sliderScaler = self.tMax / self.tSlider.maximum()
-
-        for nco in self.ncos:
-            for key in self.ncos[nco]:
-                if key == "t" or key == "sf":
-                    continue
-
-                if re.match(r"p\d", key):
-                    plotType = "phase"
-                elif key == "pw":
-                    plotType = "power"
-                else:
-                    plotType = "mag"
-
-                channelDes = {
-                    "label": "NCO_" + nco + "_" + key,
-                    "type": "NCO",
-                    "ind": nco,
-                    "key": key,
-                    "plotType": plotType,
-                    "t": self.ncos[nco]["t"],
-                    "data": self.ncos[nco][key],
-                }
-                
-                channelDes["annotations"]=[]
-                
-                if key =="am":
-                    sf = self.ncos[nco]["sf"]
-                    t = self.ncos[nco]["t"]
-
-                    # Compute differences to find where frequency changes
-                    dsf = sf - sf[np.where(sf>0)[0][0]]
-
-                    whenChange = np.abs(np.diff(dsf, prepend=0)) > 0
-
-                    # Extract change values and corresponding time points
-                    sfChanges = dsf[whenChange]
-                    tsfChanges = t[whenChange]
-                    if len(sfChanges>0):
-                        channelDes["annotations"].append({"name":"sf","t":tsfChanges,"vals":sfChanges*1e3,"units":"kHz"})
-
-
-                    
-                
-                self.channels.append(channelDes)
-                self.displayChannels.append(self.channels[-1]["label"])
-
-        self.channels.append(
-            {
-                "label": "grads_1_Gx",
-                "type": "grads",
-                "ind": str(0),
-                "key": "Gx",
-                "plotType": "mag",
-                "t": self.gradTime,
-                "data": self.grads[0],
-                "annotations":[]
-            }
-        )
-        self.displayChannels.append(self.channels[-1]["label"])
-        self.channels.append(
-            {
-                "label": "grads_2_Gy",
-                "type": "grads",
-                "ind": str(1),
-                "key": "Gy",
-                "plotType": "mag",
-                "t": self.gradTime,
-                "data": self.grads[1],
-                 "annotations":[]
-            }
-        )
-        self.displayChannels.append(self.channels[-1]["label"])
-        self.channels.append(
-            {
-                "label": "grads_3_Gz",
-                "type": "grads",
-                "ind": str(2),
-                "key": "Gz",
-                "plotType": "mag",
-                "t": self.gradTime,
-                "data": self.grads[2],
-                 "annotations":[]
-            }
-        )
-        self.displayChannels.append(self.channels[-1]["label"])
 
         self.registerCheckBoxes()
 
@@ -349,7 +250,7 @@ class GUIapp(QMainWindow):
             self.checkBoxes.append(checkBox)
 
     def checkBoxChanged(self):
-        self.displayChannels = []
+
 
         for checkBox in self.checkBoxes:
             if not checkBox.isChecked():
@@ -385,7 +286,7 @@ class GUIapp(QMainWindow):
 
         pens = [penR, penG, penB, penY]
         hasGrads = False
-        
+
         for chanInd, channel in enumerate(self.channels):
             if (channel["type"] == "grads" and not hasGrads) or channel[
                 "type"
@@ -401,9 +302,8 @@ class GUIapp(QMainWindow):
                 self.plotContainers.append(phaseContainer)
                 self.imageLayout.addWidget(phaseContainer, stretch=1)
 
-            
-            self.checkBoxes[chanInd].contID = len(self.plotContainers)-1
-            
+            self.checkBoxes[chanInd].contID = len(self.plotContainers) - 1
+
             if chanInd >= len(self.channels) - 1:
                 currentPlot.setLabel("bottom", "Time (s)")
 
@@ -418,11 +318,11 @@ class GUIapp(QMainWindow):
             if channel["plotType"] == "phase":
                 currentPlot.setYRange(0, 360)
 
-            if channel["type"]=="grads" and not hasGrads:
+            if channel["type"] == "grads" and not hasGrads:
                 currentPlot.addLegend(offset=(10, 10))
                 currentPlot.setLabel("bottom", "Time (s)")
-                
-            if channel["type"]!="grads":
+
+            if channel["type"] != "grads":
                 currentPlot.setLabel("left", channel["label"])
                 currentPlot.plot(
                     stepData["t"],
@@ -431,28 +331,33 @@ class GUIapp(QMainWindow):
                     pen=pens[chanInd % 4],
                 )
             else:
-                hasGrads=True
+                hasGrads = True
                 currentPlot.setLabel("left", "Grads")
                 currentPlot.plot(
                     stepData["t"],
                     stepData["data"],
                     name=channel["key"],
                     pen=pens[chanInd % 4],
-                )    
-            
-            
-            if len(channel["annotations"])>0:
-                
+                )
+
+            if len(channel["annotations"]) > 0:
                 for annotation in channel["annotations"]:
                     for ind, t in enumerate(annotation["t"]):
-                        
-                        line = pg.InfiniteLine(pos=t, angle=90, pen=pg.mkPen('r', style=Qt.PenStyle.DashLine))
-                        currentPlot.addItem(line)  
+                        line = pg.InfiniteLine(
+                            pos=t,
+                            angle=90,
+                            pen=pg.mkPen("r", style=Qt.PenStyle.DashLine),
+                        )
+                        currentPlot.addItem(line)
 
-                        text = pg.TextItem(f"f = {annotation["vals"][ind]:.2f} {annotation["units"]}", anchor=(0, 0), color='r')
+                        text = pg.TextItem(
+                            f"f = {annotation['vals'][ind]:.2f} {annotation['units']}",
+                            anchor=(0, 0),
+                            color="r",
+                        )
                         text.setPos(t, 110)  # adjust vertical offset if needed
                         currentPlot.addItem(text)
-            
+
         self.updateView()
 
         self.tSlider.setValue(int(self.tPos / self.sliderScaler))
