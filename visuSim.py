@@ -118,8 +118,8 @@ class GUIapp(QMainWindow):
         self.jumpPButton = QtWidgets.QPushButton()
         self.jumpNButton = QtWidgets.QPushButton()
 
-        self.jumpPButton.setText("+")
-        self.jumpNButton.setText("-")
+        self.jumpPButton.setText("->")
+        self.jumpNButton.setText("<-")
 
         self.jumpPButton.setFixedHeight(50)  # pixels
         self.jumpNButton.setFixedHeight(50)
@@ -162,9 +162,11 @@ class GUIapp(QMainWindow):
         # Layout
         buttonLayout = QtWidgets.QHBoxLayout()
         buttonLayout.addWidget(self.jumpNButton)
-        buttonLayout.addWidget(self.jumpPButton)
+        
         buttonLayout.addWidget(self.zoomOutButton)
         buttonLayout.addWidget(self.zoomInButton)
+        buttonLayout.addWidget(self.jumpPButton)
+        
         buttonLayout.addWidget(self.measureButton)
 
         layout = QtWidgets.QVBoxLayout()
