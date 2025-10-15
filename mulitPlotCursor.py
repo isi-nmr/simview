@@ -16,6 +16,10 @@ class CursorPlot(pg.PlotWidget):
         self.timestamp_label = pg.TextItem("", anchor=(1, 0), color='r')
         self.addItem(self.timestamp_label, ignoreBounds=True)
         
+        
+        self.point_label = pg.TextItem("", anchor=(1, 0),color='r')
+        self.addItem(self.point_label, ignoreBounds=True)
+        
         # Connect scene signals
         self.scene().sigMouseMoved.connect(self.on_mouse_moved)
         self.scene().installEventFilter(self)  # for enter/leave detection
@@ -96,7 +100,17 @@ class CursorPlot(pg.PlotWidget):
         if self.zoom_region_temp:
             self.removeItem(self.zoom_region_temp)
             self.zoom_region_temp = None            
-                
+
+
+    def get_curves(self):
+        """
+        Returns a list of tuples: (PlotDataItem, x_data, y_data)
+        """
+        curves = []
+        for item in self.plotItem.listDataItems():
+            x, y = item.getData()
+            curves.append((item, x, y))
+        return curves                
         
     def on_mouse_moved(self, pos):
         if self.zoom_mode and self.zoom_start_x is not None:
@@ -110,6 +124,32 @@ class CursorPlot(pg.PlotWidget):
             mouse_point = self.getViewBox().mapSceneToView(pos)
             x = mouse_point.x()
             self.cursor_line.setPos(mouse_point.x())
+
+
+            mouse_point = self.plotItem.vb.mapSceneToView(pos)
+            x_val = mouse_point.x()
+            y_val = mouse_point.y()
+            
+
+
+            # Loop over all curves to find the nearest point
+            
+            yS = []
+            names = []
+            label = ""
+            for idx, (curve, cx, cy) in enumerate(self.get_curves()):
+                # Find nearest index
+                nearest_idx = np.abs(cx - x_val).argmin()
+                yS.append(cy[nearest_idx])
+                names.append(curve.name() or "Unnamed")
+
+                label+=f"{names[-1]}:{yS[-1]:.2f}"
+            
+           
+           
+           
+            self.point_label.setText(label)
+            self.point_label.setPos(x_val, y_val)
 
 
         if hasattr(self.parent().parent().parent(), 'plots'):
@@ -179,6 +219,7 @@ class CursorPlot(pg.PlotWidget):
         """Hide cursor and label when mouse leaves the widget."""
         self.cursor_line.hide()
         self.timestamp_label.setText("")
+        self.point_label.setText("")
 
         if self.dataLoaded:
             self.hideCursor()

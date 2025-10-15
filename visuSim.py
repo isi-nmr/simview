@@ -5,17 +5,12 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtWidgets, uic, QtGui
 from PyQt6.QtCore import Qt, QSettings, QDir, QCoreApplication
-from PyQt6.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QWidget,
-    QVBoxLayout
-)
-from PyQt6.QtWidgets import QSizePolicy
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout
 
 import os
 
 from mulitPlotCursor import CursorPlot
+import re
 
 
 class GUIapp(QMainWindow):
@@ -23,16 +18,14 @@ class GUIapp(QMainWindow):
     sliderScaler = 1
 
     highlightRect = None
-    plots=[]
+    plots = []
     channels = []
     checkBoxes = []
     displayChannels = []
     plotGroups = []
-    
-    def __init__(
-        self,
-        simPath=None
-    ):
+    plotContainers = []
+
+    def __init__(self, simPath=None):
         super().__init__()
         path = Path(__file__).resolve().parent / "visusimForm.ui"
         uic.loadUi(path, self)
@@ -41,9 +34,6 @@ class GUIapp(QMainWindow):
         self.setMouseTracking(True)
 
         self.tPos = self.windowWidth * 0.5
-
-
-
 
         # self.plotGrads.setBackground("w")
         # self.plotRF.setBackground("w")
@@ -91,26 +81,23 @@ class GUIapp(QMainWindow):
         self.zoomInButton.clicked.connect(self.zoomIn)
         self.zoomOutButton.clicked.connect(self.zoomOut)
 
-        
         self.measureButton = QtWidgets.QPushButton("Measure dur")
         self.measureButton.clicked.connect(self.activate_measure)
-        
+
         # Layout
         buttonLayout = QtWidgets.QHBoxLayout()
         buttonLayout.addWidget(self.jumpNButton)
-        
+
         buttonLayout.addWidget(self.zoomOutButton)
         buttonLayout.addWidget(self.zoomInButton)
         buttonLayout.addWidget(self.jumpPButton)
-        
+
         buttonLayout.addWidget(self.measureButton)
 
         layout = QtWidgets.QVBoxLayout()
         layout.addLayout(buttonLayout)
         layout.addWidget(self.tSlider)
         self.navigation = layout
-        
-        
 
         # Menu bar
         menubar = self.menuBar()
@@ -127,11 +114,8 @@ class GUIapp(QMainWindow):
         # Read a value (with a default)
         self.dataPath = self.settings.value("lastFolder", QDir.homePath())
 
-
-
     def activate_measure(self):
         self.plots[-1].enable_measure_mode(True)
-
 
     def open_folder(self):
         folder_path = QtWidgets.QFileDialog.getExistingDirectory(
@@ -207,19 +191,16 @@ class GUIapp(QMainWindow):
         rangePos = self.tPos + self.windowWidth * 0.5
         rangeNeg = self.tPos - self.windowWidth * 0.5
 
-        
         for plot in self.plots:
             plot.setXRange(rangeNeg, rangePos)
 
     def loadData(self):
-        
-        self.plotGroups=[]
+        self.plotGroups = []
         self.plots = []
         self.checkBoxes = []
         self.channels = []
         self.displayChannels = []
-        
-        
+
         progress = QtWidgets.QProgressDialog(
             "Parsing simulation data ...", "Cancel", 0, 100, self
         )
@@ -254,77 +235,103 @@ class GUIapp(QMainWindow):
         self.tMin = 0
         self.sliderScaler = self.tMax / self.tSlider.maximum()
 
-        
         for nco in self.ncos:
-            self.channels.append("NCO"+nco)
-            self.displayChannels.append(self.channels[-1])
-        
-        self.channels.append("grads") 
-        self.displayChannels.append(self.channels[-1]) 
-            
+            for key in self.ncos[nco]:
+                if key == "t" or key == "sf":
+                    continue
+
+                if re.match(r"p\d", key):
+                    plotType = "phase"
+                elif key == "pw":
+                    plotType = "power"
+                else:
+                    plotType = "mag"
+
+                channelDes = {
+                    "label": "NCO_" + nco + "_" + key,
+                    "type": "NCO",
+                    "ind": nco,
+                    "key": key,
+                    "plotType": plotType,
+                    "t": self.ncos[nco]["t"],
+                    "data": self.ncos[nco][key],
+                }
+                self.channels.append(channelDes)
+                self.displayChannels.append(self.channels[-1]["label"])
+
+        self.channels.append(
+            {
+                "label": "grads_1_Gx",
+                "type": "grads",
+                "ind": str(0),
+                "key": "Gx",
+                "plotType": "mag",
+                "t": self.gradTime,
+                "data": self.grads[0],
+            }
+        )
+        self.displayChannels.append(self.channels[-1]["label"])
+        self.channels.append(
+            {
+                "label": "grads_2_Gy",
+                "type": "grads",
+                "ind": str(1),
+                "key": "Gy",
+                "plotType": "mag",
+                "t": self.gradTime,
+                "data": self.grads[1],
+            }
+        )
+        self.displayChannels.append(self.channels[-1]["label"])
+        self.channels.append(
+            {
+                "label": "grads_3_Gz",
+                "type": "grads",
+                "ind": str(2),
+                "key": "Gz",
+                "plotType": "mag",
+                "t": self.gradTime,
+                "data": self.grads[2],
+            }
+        )
+        self.displayChannels.append(self.channels[-1]["label"])
+
         self.registerCheckBoxes()
-            
-        
+
         self.initPlots()
         progress.setValue(90)
         progress.close()
         QtWidgets.QMessageBox.information(self, "Done", "Loading finished!")
-        
-        
+
         for plot in self.plots:
             plot.showCursor()
-        
-            
+
     def registerCheckBoxes(self):
-        
-        
         if hasattr(self, "checkBoxLayout"):
             while self.checkBoxLayout.count():
                 item = self.checkBoxLayout.takeAt(0)
                 widget = item.widget()
                 if widget is not None:
                     widget.deleteLater()
-                    
-                    
+
         self.checkBoxLayout = QtWidgets.QHBoxLayout()
-        
+
         for channel in self.channels:
             checkBox = QtWidgets.QCheckBox()
-            checkBox.setText(channel)
+            checkBox.setText(channel["label"])
             checkBox.setChecked(True)
             checkBox.stateChanged.connect(self.checkBoxChanged)
             self.checkBoxLayout.addWidget(checkBox)
             self.checkBoxes.append(checkBox)
-    
-    
-    def hidePlotsInGroup(self,chanId):
-        for plot in self.plotGroups[chanId]:
-            plot.hide()       
 
-    def showPlotsInGroup(self,chanId):
-        for plot in self.plotGroups[chanId]:
-            plot.show()       
-    
     def checkBoxChanged(self):
-        self.displayChannels=[]
-        
-        for checkBox in self.checkBoxes:
-            
-            if checkBox.isChecked():
-                self.displayChannels.append(checkBox.text())
-        
-        for chanInd, channel in enumerate(self.channels):
-            
-            if channel not in self.displayChannels:
-                
-                self.hidePlotsInGroup(chanInd)
-            else:
-                self.showPlotsInGroup(chanInd) 
+        self.displayChannels = []
 
-              
-    
-    
-            
+        for chanInd, checkBox in enumerate(self.checkBoxes):
+            if not checkBox.isChecked():
+                self.plotContainers[chanInd].hide()
+            else:
+                self.plotContainers[chanInd].show()
 
     def makeStepArrs(self, tArr, multArr):
         stepTime = np.repeat(tArr, 2)[1:]
@@ -332,189 +339,147 @@ class GUIapp(QMainWindow):
 
         return stepTime, stepGrads
 
+    def convertToStep(self, dict, key):
+        newDict = {}
+        newDict["t"] = np.repeat(dict["t"], 2)[1:]
 
-    def convertToStep(self,dict):
-        
-        dict["t"] = np.repeat(dict["t"], 2)[1:]
-        
-        for key in dict:
-            if not isinstance(dict[key],np.ndarray):
-                continue
-            
-            if key =="t":
-                continue
-            
-            dict[key] = np.repeat(dict[key], 2, -1)[ :-1]
-    
-        return dict    
+        if not isinstance(dict[key], np.ndarray):
+            newDict[key] = dict[key]
+
+        else:
+            newDict[key] = np.repeat(dict[key], 2, -1)[:-1]
+
+        return newDict
 
     def initPlots(self):
-        self.imageLayout.removeItem( self.navigation)
-        
-        stepTime, stepGrads = self.makeStepArrs(self.gradTime, self.grads)
-        ind = 0
+        self.imageLayout.removeItem(self.navigation)
+
         penR = pg.mkPen(color=(200, 0, 0), width=1.5)
         penG = pg.mkPen(color=(0, 200, 0), width=1.5)
         penB = pg.mkPen(color=(0, 0, 200), width=1.5)
         penY = pg.mkPen(color=(200, 200, 0), width=1.5)
+
+        pens = [penR, penG, penB, penY]
+        hasGrads = False
+        
+        for chanInd, channel in enumerate(self.channels):
+            if (channel["type"] == "grads" and not hasGrads) or channel[
+                "type"
+            ] != "grads":
+                currentPlot = CursorPlot()
+                phaseContainer = QWidget()
+                phaseContainer_layout = QVBoxLayout(phaseContainer)
+                phaseContainer_layout.setContentsMargins(0, 0, 0, 0)
+                phaseContainer_layout.addWidget(currentPlot)
+                vb = currentPlot.getViewBox()
+                vb.setMouseEnabled(x=False, y=True)
+                self.plots.append(currentPlot)
+                self.plotContainers.append(phaseContainer)
+                self.imageLayout.addWidget(phaseContainer, stretch=1)
+
+            if chanInd >= len(self.channels) - 1:
+                currentPlot.setLabel("bottom", "Time (s)")
+
+            stepData = self.convertToStep(channel, "data")
+
+            if np.sum(np.abs(stepData["data"])) == 0:
+                phaseContainer.hide()
+                self.checkBoxes[chanInd].blockSignals(True)
+                self.checkBoxes[chanInd].setChecked(False)
+                self.checkBoxes[chanInd].blockSignals(False)
+
+            if channel["plotType"] == "phase":
+                currentPlot.setYRange(0, 360)
+
+            if channel["type"]=="grads" and not hasGrads:
+                currentPlot.addLegend(offset=(10, 10))
+                currentPlot.setLabel("bottom", "Time (s)")
                 
-        for channel in self.channels:
-            
-            if channel == "grads":
-                continue
-            
-            nco = channel.lstrip("NCO")
-            
-            ncoStep= self.convertToStep(self.ncos[nco])
-            
-            
-            
-            phasePlot = CursorPlot()
-            powPlot = CursorPlot()
-            
-            
-            phaseContainer = QWidget()
-            phaseContainer_layout = QVBoxLayout(phaseContainer)
-            phaseContainer_layout.setContentsMargins(0, 0, 0, 0)
-            phaseContainer_layout.addWidget(phasePlot)
-
-            powContainer = QWidget()
-            powContainer_layout = QVBoxLayout(powContainer)
-            powContainer_layout.setContentsMargins(0, 0, 0, 0)
-            powContainer_layout.addWidget(powPlot)
-            
-            
-            vb = phasePlot.getViewBox()
-            vb.setMouseEnabled(x=False, y=True)
-
-            vb = powPlot.getViewBox()
-            vb.setMouseEnabled(x=False, y=True)
-            
-            self.plots.append(phasePlot)
-            self.plots.append(powPlot)
-            
-            self.plotGroups.append([phaseContainer,powContainer])
-            
-            self.imageLayout.addWidget(phaseContainer, stretch=1)
-            self.imageLayout.addWidget(powContainer, stretch=1)        
-
-
-            phasePlot.setYRange(0, 360)
-
-            if np.any(ncoStep["rgp"]>0):
-                
-                powPlot.setLabel("left", "Rx State")
-                phasePlot.setLabel("left", "Rx Phase")
-                
-                powPlot.plot(
-                    ncoStep["t"], ncoStep["rgp"], name="Rx state", pen=penG
+            if channel["type"]!="grads":
+                currentPlot.setLabel("left", channel["label"])
+                currentPlot.plot(
+                    stepData["t"],
+                    stepData["data"],
+                    name=channel["label"],
+                    pen=pens[chanInd % 4],
                 )
-                phasePlot.plot(
-                    ncoStep["t"], ncoStep["p0"], name="Rx p0", pen=penG
-                )
-                phasePlot.plot(
-                    ncoStep["t"], ncoStep["p1"], name="Rx p1", pen=penG
-                )
-                phasePlot.plot(
-                    ncoStep["t"], ncoStep["p2"], name="Rx p2", pen=penG
-                )
-                   
             else:
-                powPlot.setLabel("left", "RF Amp")
-                phasePlot.setLabel("left", "RF Phase")
-                powPlot.plot(
-                    ncoStep["t"], ncoStep["am"], name="Tx amplitude", pen=penR
-                )
-                phasePlot.plot(
-                    ncoStep["t"], ncoStep["p0"], name="Tx p0", pen=penG
-                )
-                phasePlot.plot(
-                    ncoStep["t"], ncoStep["p1"], name="Tx p1", pen=penG
-                )
-                phasePlot.plot(
-                    ncoStep["t"], ncoStep["p2"], name="Tx p2", pen=penG
-                )
-
-                phasePlot.plot(
-                    ncoStep["t"], ncoStep["pw"], name="Tx power", pen=penY
-                )            
+                hasGrads=True
+                currentPlot.setLabel("left", "Grads")
+                currentPlot.plot(
+                    stepData["t"],
+                    stepData["data"],
+                    name=channel["key"],
+                    pen=pens[chanInd % 4],
+                )    
             
-            sf = ncoStep["sf"]
-            t = ncoStep["t"]
+            # if channel["plotType"] == "amplitude":
+            #     sf = ncoStep["sf"]
+            #     t = ncoStep["t"]
 
-            # Compute differences to find where frequency changes
-            dsf = sf - sf[np.where(sf>0)[0][0]]
-            
-            whenChange = np.abs(np.diff(dsf, prepend=0)) > 0
+            #     # Compute differences to find where frequency changes
+            #     dsf = sf - sf[np.where(sf>0)[0][0]]
 
-            # Extract change values and corresponding time points
-            sfChanges = dsf[whenChange]
-            tsfChanges = t[whenChange]
+            #     whenChange = np.abs(np.diff(dsf, prepend=0)) > 0
 
-            # Plot vertical markers and labels for frequency changes
-            for ind, sfChange in enumerate(sfChanges):
-                x = tsfChanges[ind]
-                freq = sfChange
+            #     # Extract change values and corresponding time points
+            #     sfChanges = dsf[whenChange]
+            #     tsfChanges = t[whenChange]
 
-                # Optional: draw a vertical line marker
-                line = pg.InfiniteLine(pos=x, angle=90, pen=pg.mkPen('r', style=Qt.PenStyle.DashLine))
-                powPlot.addItem(line)
+            #     # Plot vertical markers and labels for frequency changes
+            #     for ind, sfChange in enumerate(sfChanges):
+            #         x = tsfChanges[ind]
+            #         freq = sfChange
 
-                # Add a text label slightly above the bottom
-                text = pg.TextItem(f"f = {freq*1e3:.2f} kHz", anchor=(0, 0), color='r')
-                text.setPos(x, 110)  # adjust vertical offset if needed
-                powPlot.addItem(text)
-            
+            #         # Optional: draw a vertical line marker
+            #         line = pg.InfiniteLine(pos=x, angle=90, pen=pg.mkPen('r', style=Qt.PenStyle.DashLine))
+            #         currentPlot.addItem(line)
 
+            #         # Add a text label slightly above the bottom
+            #         text = pg.TextItem(f"f = {freq*1e3:.2f} kHz", anchor=(0, 0), color='r')
+            #         text.setPos(x, 110)  # adjust vertical offset if needed
+            #         currentPlot.addItem(text)
 
-            ind+=2
-            
-        
+        # gradPlot = CursorPlot()
 
-        
-        gradPlot = CursorPlot()
-        
-        gradContainer = QWidget()
-        gradContainer_layout = QVBoxLayout(gradContainer)
-        gradContainer_layout.setContentsMargins(0, 0, 0, 0)
-        gradContainer_layout.addWidget(gradPlot) 
-        
-               
-        self.plots.append(gradPlot)
-        
-        self.plotGroups.append([gradContainer])
+        # gradContainer = QWidget()
+        # gradContainer_layout = QVBoxLayout(gradContainer)
+        # gradContainer_layout.setContentsMargins(0, 0, 0, 0)
+        # gradContainer_layout.addWidget(gradPlot)
 
-        self.imageLayout.addWidget( gradContainer,stretch=1)
-        ind+=1
-            
-        
-        gradPlot.plot(
-                stepTime,  stepGrads[0, :], name="Gx", pen=penG
-            )    
+        # self.plots.append(gradPlot)
 
-        gradPlot.plot(
-                stepTime,  stepGrads[1, :], name="Gy", pen=penR
-            )   
-        
-        gradPlot.plot(
-                stepTime,  stepGrads[2, :], name="Gz", pen=penB
-            )                       
+        # self.plotGroups.append([gradContainer])
 
-        
-        gradPlot.setLabel("left", "Gradients")
-        gradPlot.setLabel("bottom", "Time (s)")
-        gradPlot.addLegend(offset=(10, 10))
+        # self.imageLayout.addWidget( gradContainer,stretch=1)
+        # ind+=1
 
-        vb = gradPlot.getViewBox()
-        vb.setMouseEnabled(x=False, y=True)        
+        # gradPlot.plot(
+        #         stepTime,  stepGrads[0, :], name="Gx", pen=penG
+        #     )
+
+        # gradPlot.plot(
+        #         stepTime,  stepGrads[1, :], name="Gy", pen=penR
+        #     )
+
+        # gradPlot.plot(
+        #         stepTime,  stepGrads[2, :], name="Gz", pen=penB
+        #     )
+
+        # gradPlot.setLabel("left", "Gradients")
+        # gradPlot.setLabel("bottom", "Time (s)")
+        # gradPlot.addLegend(offset=(10, 10))
+
+        # vb = gradPlot.getViewBox()
+        # vb.setMouseEnabled(x=False, y=True)
 
         self.updateView()
 
         self.tSlider.setValue(int(self.tPos / self.sliderScaler))
 
-        self.imageLayout.addLayout( self.navigation)
-        self.imageLayout.addLayout( self.checkBoxLayout)
-        
+        self.imageLayout.addLayout(self.navigation)
+        self.imageLayout.addLayout(self.checkBoxLayout)
+
 
 if __name__ == "__main__":
     inputArgs = sys.argv
