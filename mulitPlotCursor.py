@@ -112,8 +112,8 @@ class CursorPlot(pg.PlotWidget):
             self.cursor_line.setPos(mouse_point.x())
 
 
-        if hasattr(self.parent().parent(), 'plots'):
-            for other in self.parent().parent().plots:
+        if hasattr(self.parent().parent().parent(), 'plots'):
+            for other in self.parent().parent().parent().plots:
                 other.cursor_line.setPos(mouse_point.x())
                 # Update timestamp label at bottom-right corner
                 view_rect = other.viewRect()
@@ -148,10 +148,10 @@ class CursorPlot(pg.PlotWidget):
             if start != end:
                 self.setXRange(min(start, end), max(start, end), padding=0)
                 
-                if hasattr(self.parent().parent(), 'plots'):
-                    self.parent().parent().windowWidth = max(start, end)-min(start, end)
-                    self.parent().parent().tPos = (max(start, end)+min(start, end))/2
-                    for other in self.parent().parent().plots: 
+                if hasattr(self.parent().parent().parent(), 'plots'):
+                    self.parent().parent().parent().windowWidth = max(start, end)-min(start, end)
+                    self.parent().parent().parent().tPos = (max(start, end)+min(start, end))/2
+                    for other in self.parent().parent().parent().plots: 
                         other.setXRange(min(start, end), max(start, end), padding=0)
                 
             # remove temporary region
@@ -182,8 +182,8 @@ class CursorPlot(pg.PlotWidget):
 
         if self.dataLoaded:
             self.hideCursor()
-            if hasattr(self.parent().parent(), 'plots'):
-                for other in self.parent().parent().plots: 
+            if hasattr(self.parent().parent().parent(), 'plots'):
+                for other in self.parent().parent().parent().plots: 
                     other.hideCursor()
                     other.timestamp_label.setText("")
         
@@ -195,8 +195,8 @@ class CursorPlot(pg.PlotWidget):
         
         if self.dataLoaded:
             self.showCursor()
-            if hasattr(self.parent().parent(), 'plots'):
-                for other in self.parent().parent().plots: 
+            if hasattr(self.parent().parent().parent(), 'plots'):
+                for other in self.parent().parent().parent().plots: 
                     other.showCursor()
 
         super().leaveEvent(event)
