@@ -256,6 +256,27 @@ class GUIapp(QMainWindow):
                     "t": self.ncos[nco]["t"],
                     "data": self.ncos[nco][key],
                 }
+                
+                channelDes["annotations"]=[]
+                
+                if key =="am":
+                    sf = self.ncos[nco]["sf"]
+                    t = self.ncos[nco]["t"]
+
+                    # Compute differences to find where frequency changes
+                    dsf = sf - sf[np.where(sf>0)[0][0]]
+
+                    whenChange = np.abs(np.diff(dsf, prepend=0)) > 0
+
+                    # Extract change values and corresponding time points
+                    sfChanges = dsf[whenChange]
+                    tsfChanges = t[whenChange]
+                    if len(sfChanges>0):
+                        channelDes["annotations"].append({"name":"sf","t":tsfChanges,"vals":sfChanges*1e3,"units":"kHz"})
+
+
+                    
+                
                 self.channels.append(channelDes)
                 self.displayChannels.append(self.channels[-1]["label"])
 
@@ -268,6 +289,7 @@ class GUIapp(QMainWindow):
                 "plotType": "mag",
                 "t": self.gradTime,
                 "data": self.grads[0],
+                "annotations":[]
             }
         )
         self.displayChannels.append(self.channels[-1]["label"])
@@ -280,6 +302,7 @@ class GUIapp(QMainWindow):
                 "plotType": "mag",
                 "t": self.gradTime,
                 "data": self.grads[1],
+                 "annotations":[]
             }
         )
         self.displayChannels.append(self.channels[-1]["label"])
@@ -292,6 +315,7 @@ class GUIapp(QMainWindow):
                 "plotType": "mag",
                 "t": self.gradTime,
                 "data": self.grads[2],
+                 "annotations":[]
             }
         )
         self.displayChannels.append(self.channels[-1]["label"])
@@ -327,11 +351,11 @@ class GUIapp(QMainWindow):
     def checkBoxChanged(self):
         self.displayChannels = []
 
-        for chanInd, checkBox in enumerate(self.checkBoxes):
+        for checkBox in self.checkBoxes:
             if not checkBox.isChecked():
-                self.plotContainers[chanInd].hide()
+                self.plotContainers[checkBox.contID].hide()
             else:
-                self.plotContainers[chanInd].show()
+                self.plotContainers[checkBox.contID].show()
 
     def makeStepArrs(self, tArr, multArr):
         stepTime = np.repeat(tArr, 2)[1:]
@@ -377,6 +401,9 @@ class GUIapp(QMainWindow):
                 self.plotContainers.append(phaseContainer)
                 self.imageLayout.addWidget(phaseContainer, stretch=1)
 
+            
+            self.checkBoxes[chanInd].contID = len(self.plotContainers)-1
+            
             if chanInd >= len(self.channels) - 1:
                 currentPlot.setLabel("bottom", "Time (s)")
 
@@ -413,66 +440,19 @@ class GUIapp(QMainWindow):
                     pen=pens[chanInd % 4],
                 )    
             
-            # if channel["plotType"] == "amplitude":
-            #     sf = ncoStep["sf"]
-            #     t = ncoStep["t"]
+            
+            if len(channel["annotations"])>0:
+                
+                for annotation in channel["annotations"]:
+                    for ind, t in enumerate(annotation["t"]):
+                        
+                        line = pg.InfiniteLine(pos=t, angle=90, pen=pg.mkPen('r', style=Qt.PenStyle.DashLine))
+                        currentPlot.addItem(line)  
 
-            #     # Compute differences to find where frequency changes
-            #     dsf = sf - sf[np.where(sf>0)[0][0]]
-
-            #     whenChange = np.abs(np.diff(dsf, prepend=0)) > 0
-
-            #     # Extract change values and corresponding time points
-            #     sfChanges = dsf[whenChange]
-            #     tsfChanges = t[whenChange]
-
-            #     # Plot vertical markers and labels for frequency changes
-            #     for ind, sfChange in enumerate(sfChanges):
-            #         x = tsfChanges[ind]
-            #         freq = sfChange
-
-            #         # Optional: draw a vertical line marker
-            #         line = pg.InfiniteLine(pos=x, angle=90, pen=pg.mkPen('r', style=Qt.PenStyle.DashLine))
-            #         currentPlot.addItem(line)
-
-            #         # Add a text label slightly above the bottom
-            #         text = pg.TextItem(f"f = {freq*1e3:.2f} kHz", anchor=(0, 0), color='r')
-            #         text.setPos(x, 110)  # adjust vertical offset if needed
-            #         currentPlot.addItem(text)
-
-        # gradPlot = CursorPlot()
-
-        # gradContainer = QWidget()
-        # gradContainer_layout = QVBoxLayout(gradContainer)
-        # gradContainer_layout.setContentsMargins(0, 0, 0, 0)
-        # gradContainer_layout.addWidget(gradPlot)
-
-        # self.plots.append(gradPlot)
-
-        # self.plotGroups.append([gradContainer])
-
-        # self.imageLayout.addWidget( gradContainer,stretch=1)
-        # ind+=1
-
-        # gradPlot.plot(
-        #         stepTime,  stepGrads[0, :], name="Gx", pen=penG
-        #     )
-
-        # gradPlot.plot(
-        #         stepTime,  stepGrads[1, :], name="Gy", pen=penR
-        #     )
-
-        # gradPlot.plot(
-        #         stepTime,  stepGrads[2, :], name="Gz", pen=penB
-        #     )
-
-        # gradPlot.setLabel("left", "Gradients")
-        # gradPlot.setLabel("bottom", "Time (s)")
-        # gradPlot.addLegend(offset=(10, 10))
-
-        # vb = gradPlot.getViewBox()
-        # vb.setMouseEnabled(x=False, y=True)
-
+                        text = pg.TextItem(f"f = {annotation["vals"][ind]:.2f} {annotation["units"]}", anchor=(0, 0), color='r')
+                        text.setPos(t, 110)  # adjust vertical offset if needed
+                        currentPlot.addItem(text)
+            
         self.updateView()
 
         self.tSlider.setValue(int(self.tPos / self.sliderScaler))
