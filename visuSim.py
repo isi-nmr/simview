@@ -31,9 +31,7 @@ class GUIapp(QMainWindow):
     
     def __init__(
         self,
-        simPath="",
-        outputPath="testIns",
-        config=None
+        simPath=None
     ):
         super().__init__()
         path = Path(__file__).resolve().parent / "visusimForm.ui"
