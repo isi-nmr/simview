@@ -176,7 +176,16 @@ class CursorPlot(pg.PlotWidget):
             label = ""
             for idx, (curve, cx, cy) in enumerate(self.get_curves()):
                 # Find nearest index
-                nearest_idx = np.abs(cx - x_val).argmin()
+                
+                mask = cx <= x_val
+                if np.any(mask):
+                    # Pick the last index where cx is less than or equal to x_val
+                    nearest_idx = np.where(mask)[0][-1]
+                else:
+                    # Fallback: all cx are greater, so pick the first one
+                    nearest_idx = 0
+                    
+                # nearest_idx = np.abs(cx - x_val).argmin()
                 yS.append(cy[nearest_idx+1])
                 names.append(curve.name() or "Unnamed")
 
