@@ -44,6 +44,13 @@ class CursorPlot(pg.PlotWidget):
         mouse_point = self.getViewBox().mapSceneToView(event.position())
         if self.measure_mode:
             if self.start_x is None:
+                
+                if hasattr(self.parent().parent().parent(), "plots"):
+                    for other in self.parent().parent().parent().plots:
+                        if other == self:
+                            continue
+                        other.measure_mode = False
+                        
                 # First click → start measuring
                 self.start_x = mouse_point.x()
 
@@ -63,6 +70,14 @@ class CursorPlot(pg.PlotWidget):
                 # Second click → finish measurement
                 self.measure_mode = False
                 self.start_x = None  # reset start for next measurement
+                if hasattr(self.parent().parent().parent(), "plots"):
+                    for other in self.parent().parent().parent().plots:
+                        if other == self:
+                            continue
+                        other.start_x = None
+                        other.measure_mode = False
+
+
 
         elif self.zoom_mode:
             self.zoom_start_x = mouse_point.x()

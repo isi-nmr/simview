@@ -18,11 +18,12 @@ class GUIapp(QMainWindow):
     sliderScaler = 1
 
     highlightRect = None
-    plots = []
+    plots: list["CursorPlot"] = []
     channels = []
     checkBoxes = []
     plotContainers = []
     selectedChannels = []
+
     def __init__(self, simPath=None):
         super().__init__()
         path = Path(__file__).resolve().parent / "visusimForm.ui"
@@ -120,7 +121,8 @@ class GUIapp(QMainWindow):
             self.loadData()
 
     def activate_measure(self):
-        self.plots[-1].enable_measure_mode(True)
+        for plot in self.plots:
+            plot.enable_measure_mode(True)
 
     def open_folder(self):
         folder_path = QtWidgets.QFileDialog.getExistingDirectory(
