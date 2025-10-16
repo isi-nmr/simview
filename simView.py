@@ -328,8 +328,17 @@ class GUIapp(QMainWindow):
         penG = pg.mkPen(color=(0, 240, 0), width=1.5)
         penB = pg.mkPen(color=(0, 0, 240), width=1.5)
         penY = pg.mkPen(color=(200, 200, 0), width=1.5)
+        penC = pg.mkPen(color=(0, 200, 200), width=1.5)    # Cyan
+        penM = pg.mkPen(color=(200, 0, 200), width=1.5)    # Magenta
+        penO = pg.mkPen(color=(255, 128, 0), width=1.5)    # Orange
+        penP = pg.mkPen(color=(150, 0, 150), width=1.5)    # Purple
+        penTeal = pg.mkPen(color=(0, 150, 120), width=1.5) # Teal
+        penPink = pg.mkPen(color=(255, 105, 180), width=1.5)# Pink
+        penGray = pg.mkPen(color=(128, 128, 128), width=1.5)# Gray
+        penBrown = pg.mkPen(color=(139, 69, 19), width=1.5)# Brown
 
-        pens = [penR, penG, penB, penY]
+        pens = [penR, penG, penB, penY, penC, penM, penO, penP, penTeal, penPink, penGray, penBrown]
+        
         
         penDict = {"r":penR,"g":penG,"b":penB,"y":penY}
         
@@ -396,7 +405,7 @@ class GUIapp(QMainWindow):
                                       
             for lineInd, line in enumerate(channel):
                 stepData = self.convertToStep(line, "data")
-                currentPen = line.get("pen",pens[chanInd % 4])
+                currentPen = line.get("pen",pens[chanInd % len(pens)])
                 
                 if type(currentPen) is str:
                     currentPen=penDict[currentPen]
