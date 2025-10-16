@@ -1,6 +1,20 @@
-from PyQt6 import QtCore
+
 import pyqtgraph as pg
 import numpy as np
+from PyQt6.QtGui import QColor,QPainter
+
+
+class TextItemWithBg(pg.TextItem):
+    def __init__(self, text="", color="w", bg_color=QColor(0,0,0,150), **kwargs):
+        super().__init__(text, color=color, **kwargs)
+        self.bg_color = bg_color
+
+    def paint(self, p: QPainter, *args):
+        # Draw background rectangle
+        rect = self.boundingRect()
+        p.fillRect(rect, self.bg_color)
+        # Draw the usual text on top
+        super().paint(p, *args)
 
 
 class CursorPlot(pg.PlotWidget):
@@ -16,10 +30,15 @@ class CursorPlot(pg.PlotWidget):
         self.cursor_line.hide()
         self.addItem(self.cursor_line)
 
-        self.timestamp_label = pg.TextItem("", anchor=(1, 0), color="r")
+        self.timestamp_label = TextItemWithBg("", anchor=(1, 0), color="r")
+        self.timestamp_label.setZValue(100) 
         self.addItem(self.timestamp_label, ignoreBounds=True)
 
-        self.point_label = pg.TextItem("", anchor=(1, 0), color="r")
+        self.point_label =TextItemWithBg("", anchor=(1, 0), color="r")
+        self.point_label.setZValue(100) 
+        
+
+
         self.addItem(self.point_label, ignoreBounds=True)
 
         # Connect scene signals
@@ -167,6 +186,7 @@ class CursorPlot(pg.PlotWidget):
 
             self.point_label.setText(label)
             self.point_label.setPos(x_val, y_val)
+
 
         if hasattr(self.parent().parent().parent(), "plots"):
             for other in self.parent().parent().parent().plots:

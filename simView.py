@@ -24,7 +24,7 @@ class GUIapp(QMainWindow):
     plotContainers = []
     selectedChannels = []
 
-    def __init__(self, simPath=None):
+    def __init__(self, simPath=None,data=None):
         super().__init__()
         path = Path(__file__).resolve().parent / "visusimForm.ui"
         uic.loadUi(path, self)
@@ -119,6 +119,9 @@ class GUIapp(QMainWindow):
             self.dataPath = self.settings.value("lastFolder", QDir.homePath())
         else:
             self.loadData()
+            
+        if data is not None:
+            self.loadData(data)    
 
     def activate_measure(self):
         for plot in self.plots:
@@ -222,7 +225,7 @@ class GUIapp(QMainWindow):
         self.checkBoxes = []
         self.channels = []        
 
-    def loadData(self):
+    def loadData(self,data=None):
         
         self.resetApp()
 
@@ -237,10 +240,17 @@ class GUIapp(QMainWindow):
         progress.setValue(5)
         QCoreApplication.processEvents()
 
-        if os.path.exists(self.dataPath + "/" + "pulse_seq.json"):
-            self.channels = readNMRScopeBChannels(self.dataPath, progress, self)        
+        
+        if data is None:
+            if os.path.exists(self.dataPath + "/" + "pulse_seq.json"):
+                self.channels = readNMRScopeBChannels(self.dataPath, progress, self)        
+            else:
+                self.channels = readBrkrChannels(self.dataPath, progress, self)
         else:
-            self.channels = readBrkrChannels(self.dataPath, progress, self)
+             self.channels = readNMRScopeBChannels(data, progress, self)     
+            
+            
+        
         
         self.tMax = 0
         for channel in self.channels:
@@ -342,9 +352,9 @@ class GUIapp(QMainWindow):
             plotItem.showAxis('left', True)
             plotItem.showAxis('right', True)
             axis = currentPlot.getPlotItem().getAxis('right')
-            axis.setWidth(50)  # fixed width in pixels
+            axis.setWidth(60)  # fixed width in pixels
             axis = currentPlot.getPlotItem().getAxis('left')
-            axis.setWidth(50)  # fixed width in pixels
+            axis.setWidth(60)  # fixed width in pixels
                 
             self.checkBoxes[chanInd].contID = len(self.plotContainers) - 1
             
@@ -353,8 +363,11 @@ class GUIapp(QMainWindow):
                 currentPlot.setLabel("bottom", "Time (s)")
 
             if channel[0]["plotType"] == "phase":
-                currentPlot.setYRange(0, 360)
-            
+                if channel[0].get("units","deg") !="rad": 
+                    currentPlot.setYRange(0, 360)
+                else:
+                    currentPlot.setYRange(-np.pi, np.pi)
+                    
             if len(channel)>1:
                 currentPlot.addLegend(offset=(10, 10))
             
@@ -365,6 +378,9 @@ class GUIapp(QMainWindow):
                 self.checkBoxes[chanInd].blockSignals(True)
                 self.checkBoxes[chanInd].setChecked(False)
                 self.checkBoxes[chanInd].blockSignals(False)
+            
+            
+                
             if self.selectedChannels != []:            
                 if channel[0]["chanLabel"] in self.selectedChannels:
                     phaseContainer.show()
@@ -416,6 +432,17 @@ class GUIapp(QMainWindow):
 
         self.imageLayout.addLayout(self.navigation)
 
+
+
+def show_graphs_from_dict(data):
+    app = QApplication(sys.argv)  # ✅ Must be first
+    gui = GUIapp(data=data)  # ✅ Now it's safe
+    gui.show()
+    sys.exit(app.exec())
+    
+    
+    
+    
 
 if __name__ == "__main__":
     inputArgs = sys.argv

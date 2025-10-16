@@ -2,11 +2,16 @@ import json
 import re
 import numpy as np
 
-def readNMRScopeBChannels(path,progress,app):
+def readNMRScopeBChannels(path_data,progress,app):
     
-    with open(path+"/pulse_seq.json") as f:
-        data = json.load(f)
+    if type(path_data) is str:
+        with open(path_data+"/pulse_seq.json") as f:
+            data = json.load(f)
         
+        app.setWindowTitle(f"{path_data}")
+    else:
+        data = path_data
+               
     channels = []
     
     # Move gradients to the end...
@@ -18,10 +23,10 @@ def readNMRScopeBChannels(path,progress,app):
         if k in data:
             new_data[k] = data[k]
             
-    app.setWindowTitle(f"{path}")
     
     
-    time = np.array(data["time"])*1e-6
+    
+    time = np.array(data["time"]["val"])*1e-3
     
     for channelName in new_data:
         if channelName == "time":
@@ -32,22 +37,29 @@ def readNMRScopeBChannels(path,progress,app):
         else:
             plotType = "mag"
         
-        dataNpy = np.array(new_data[channelName])
+        dataNpy = np.array(new_data[channelName]["val"])
         
         if dataNpy.size != time.size:
             print (f"Array length does not match the time vector for channel {channelName}. Found {dataNpy.size} samples, time vector has {time.size} samples skipping...")
             continue
         
+        
+        if new_data[channelName]["units"] != '':
+            unitLabel = f"({new_data[channelName]["units"]})"
+        else:
+            unitLabel = "(-)"
                 
         channelDes = {
-            "chanLabel": channelName,
+            "chanLabel": channelName +" "+unitLabel,
             "label": channelName,
             "type": "grads" if re.match(r"g\w",channelName) else "NCO",
             "ind": str(0),
             "key": channelName,
             "plotType": plotType,
+            "units": new_data[channelName]["units"],
             "t": time,
             "data":dataNpy,
+            "show": new_data[channelName]["show"]=="yes"
         }
         channelDes["annotations"] = []            
         channels.append([channelDes])

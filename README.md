@@ -12,3 +12,17 @@ Simple tool to visualize outputs from Paravision pulse sequence simulation
 ## Usage
 - Upon opening the window use file -> Open Folder and open folder with the simulation output (contianing either bruker output or NMRScopeB output)
 - Or run from command line as python3 simView {path}
+
+- Or by using the function
+```python
+from simView import show_graphs_from_dict
+
+import json
+
+path = "/home/vitous/Documents/seqSim/scopeBNew/pulse_seq.json"
+with open(path) as f:
+    data = json.load(f)
+    
+show_graphs_from_dict(data)    
+
+```
