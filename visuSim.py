@@ -108,6 +108,7 @@ class GUIapp(QMainWindow):
         # Read a value (with a default)
         self.dataPath = self.settings.value("lastFolder", QDir.homePath())
 
+
     def activate_measure(self):
         self.plots[-1].enable_measure_mode(True)
 
@@ -301,7 +302,14 @@ class GUIapp(QMainWindow):
                 self.plots.append(currentPlot)
                 self.plotContainers.append(phaseContainer)
                 self.imageLayout.addWidget(phaseContainer, stretch=1)
-
+                
+                plotItem = currentPlot.getPlotItem()
+                plotItem.showAxis('left', True)
+                plotItem.showAxis('right', True)
+                axis = currentPlot.getPlotItem().getAxis('right')
+                axis.setWidth(50)  # fixed width in pixels
+                axis = currentPlot.getPlotItem().getAxis('left')
+                axis.setWidth(50)  # fixed width in pixels
             self.checkBoxes[chanInd].contID = len(self.plotContainers) - 1
 
             if chanInd >= len(self.channels) - 1:
@@ -323,7 +331,7 @@ class GUIapp(QMainWindow):
                 currentPlot.setLabel("bottom", "Time (s)")
 
             if channel["type"] != "grads":
-                currentPlot.setLabel("left", channel["label"])
+                currentPlot.setLabel("right", channel["label"])
                 currentPlot.plot(
                     stepData["t"],
                     stepData["data"],
@@ -332,7 +340,7 @@ class GUIapp(QMainWindow):
                 )
             else:
                 hasGrads = True
-                currentPlot.setLabel("left", "Grads")
+                currentPlot.setLabel("right", "Grads")
                 currentPlot.plot(
                     stepData["t"],
                     stepData["data"],
