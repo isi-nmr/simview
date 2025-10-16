@@ -22,7 +22,7 @@ class GUIapp(QMainWindow):
     channels = []
     checkBoxes = []
     plotContainers = []
-
+    selectedChannels = []
     def __init__(self, simPath=None):
         super().__init__()
         path = Path(__file__).resolve().parent / "visusimForm.ui"
@@ -106,14 +106,18 @@ class GUIapp(QMainWindow):
         # Create settings object
         self.settings = QSettings("MR_ISIBrno", "BrukerSimView")
 
-        # Read a value (with a default)
-        self.dataPath = self.settings.value("lastFolder", QDir.homePath())
-        
+
+        self.selectedChannels = self.settings.value("selectedChannels",[])
         
         self.leftMenu = QVBoxLayout()
         
         self.horizontalLayout_2.insertLayout(0,self.leftMenu)
 
+        # Read a value (with a default)
+        if self.dataPath is None:
+            self.dataPath = self.settings.value("lastFolder", QDir.homePath())
+        else:
+            self.loadData()
 
     def activate_measure(self):
         self.plots[-1].enable_measure_mode(True)
@@ -200,10 +204,25 @@ class GUIapp(QMainWindow):
         for plot in self.plots:
             plot.setXRange(rangeNeg, rangePos)
 
-    def loadData(self):
+    def resetApp(self):
+        if self.plotContainers:
+            for container in self.plotContainers:
+                # Remove widget from layout
+                self.layout().removeWidget(container)
+                
+                # Delete the widget properly
+                container.setParent(None)
+                container.deleteLater()
+        
+        self.plotContainers = []
+        
         self.plots = []
         self.checkBoxes = []
-        self.channels = []
+        self.channels = []        
+
+    def loadData(self):
+        
+        self.resetApp()
 
 
         progress = QtWidgets.QProgressDialog(
@@ -233,11 +252,12 @@ class GUIapp(QMainWindow):
         self.initPlots()
         progress.setValue(90)
         progress.close()
-        QtWidgets.QMessageBox.information(self, "Done", "Loading finished!")
+        
 
         for plot in self.plots:
             plot.showCursor()
 
+        
     def registerCheckBoxes(self):
         if hasattr(self, "leftMenu"):
             while self.leftMenu.count():
@@ -259,10 +279,18 @@ class GUIapp(QMainWindow):
 
         for checkBox in self.checkBoxes:
             if not checkBox.isChecked():
+                if checkBox.text() in self.selectedChannels:
+                    self.selectedChannels.remove(checkBox.text())
                 self.plotContainers[checkBox.contID].hide()
             else:
+                if checkBox.text() not in self.selectedChannels:
+                    self.selectedChannels.append(checkBox.text())
                 self.plotContainers[checkBox.contID].show()
 
+        
+        
+        self.settings.setValue("selectedChannels", self.selectedChannels)
+        
     def makeStepArrs(self, tArr, multArr):
         stepTime = np.repeat(tArr, 2)[1:]
         stepGrads = np.repeat(multArr, 2, -1)[:, :-1]
@@ -284,16 +312,16 @@ class GUIapp(QMainWindow):
     def initPlots(self):
         self.imageLayout.removeItem(self.navigation)
 
-        penR = pg.mkPen(color=(200, 0, 0), width=1.5)
-        penG = pg.mkPen(color=(0, 200, 0), width=1.5)
-        penB = pg.mkPen(color=(0, 0, 200), width=1.5)
+        penR = pg.mkPen(color=(240, 0, 0), width=1.5)
+        penG = pg.mkPen(color=(0, 240, 0), width=1.5)
+        penB = pg.mkPen(color=(0, 0, 240), width=1.5)
         penY = pg.mkPen(color=(200, 200, 0), width=1.5)
 
         pens = [penR, penG, penB, penY]
         
         penDict = {"r":penR,"g":penG,"b":penB,"y":penY}
         
-        hasGrads = False
+
 
         for chanInd, channel in enumerate(self.channels):
 
@@ -328,20 +356,33 @@ class GUIapp(QMainWindow):
             if len(channel)>1:
                 currentPlot.addLegend(offset=(10, 10))
             
-            for line in channel:
-                stepData = self.convertToStep(line, "data")
+            currentPlot.setLabel("right", channel[0]["chanLabel"])
 
-                if np.sum(np.abs(stepData["data"])) == 0:
+            if np.sum(np.abs(channel[0]["data"])) == 0:
+                phaseContainer.hide()
+                self.checkBoxes[chanInd].blockSignals(True)
+                self.checkBoxes[chanInd].setChecked(False)
+                self.checkBoxes[chanInd].blockSignals(False)
+            if self.selectedChannels != []:            
+                if channel[0]["chanLabel"] in self.selectedChannels:
+                    phaseContainer.show()
+                    self.checkBoxes[chanInd].blockSignals(True)
+                    self.checkBoxes[chanInd].setChecked(True)
+                    self.checkBoxes[chanInd].blockSignals(False)
+                else:
                     phaseContainer.hide()
                     self.checkBoxes[chanInd].blockSignals(True)
                     self.checkBoxes[chanInd].setChecked(False)
-                    self.checkBoxes[chanInd].blockSignals(False)
-
-                currentPlot.setLabel("right", line["label"])
-                
-                
+                    self.checkBoxes[chanInd].blockSignals(False)  
+                    
+                                      
+            for lineInd, line in enumerate(channel):
+                stepData = self.convertToStep(line, "data")
                 currentPen = line.get("pen",pens[chanInd % 4])
                 
+                if type(currentPen) is str:
+                    currentPen=penDict[currentPen]
+
                 currentPlot.plot(
                     stepData["t"],
                     stepData["data"],
@@ -377,7 +418,12 @@ class GUIapp(QMainWindow):
 if __name__ == "__main__":
     inputArgs = sys.argv
 
+    if len(sys.argv)>0:
+        path = sys.argv[1] 
+    else:
+        path = None
+        
     app = QApplication(sys.argv)  # ✅ Must be first
-    gui = GUIapp("/mnt/c/Users/vitou/Documents/mrScanSim/")  # ✅ Now it's safe
+    gui = GUIapp(path)  # ✅ Now it's safe
     gui.show()
     sys.exit(app.exec())
