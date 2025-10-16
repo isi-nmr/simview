@@ -418,7 +418,7 @@ class GUIapp(QMainWindow):
 if __name__ == "__main__":
     inputArgs = sys.argv
 
-    if len(sys.argv)>0:
+    if len(sys.argv)>1:
         path = sys.argv[1] 
     else:
         path = None
