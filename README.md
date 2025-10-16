@@ -2,11 +2,18 @@
 
 Simple tool to visualize outputs from Paravision pulse sequence simulation 
 
-## Installation
+## Installation with poetry
 - Install python (mainly concerns windows)
 - Make sure at least Python3.12 exists on the system and can be invoked by python --version
 - Install poetry https://python-poetry.org/docs/#installing-with-the-official-installer
 - run poetry install
+- run the simView app in the created venv
+
+## Installation manual
+- Install python (mainly concerns windows)
+- Make sure at least Python3.12 exists on the system and can be invoked by python --version
+- Create venv
+- install packages from pyproject.toml using pip
 - run the simView app in the created venv
 
 ## Usage
