@@ -143,7 +143,7 @@ class CursorPlot(pg.PlotWidget):
             for idx, (curve, cx, cy) in enumerate(self.get_curves()):
                 # Find nearest index
                 nearest_idx = np.abs(cx - x_val).argmin()
-                yS.append(cy[nearest_idx])
+                yS.append(cy[nearest_idx+1])
                 names.append(curve.name() or "Unnamed")
 
                 label += f"{names[-1]}:{yS[-1]:.2f} "
