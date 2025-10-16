@@ -40,6 +40,7 @@ def readNMRScopeBChannels(path,progress,app):
         
                 
         channelDes = {
+            "chanLabel": channelName,
             "label": channelName,
             "type": "grads" if re.match(r"g\w",channelName) else "NCO",
             "ind": str(0),
@@ -49,6 +50,6 @@ def readNMRScopeBChannels(path,progress,app):
             "data":dataNpy,
         }
         channelDes["annotations"] = []            
-        channels.append(channelDes)
+        channels.append([channelDes])
     
     return channels

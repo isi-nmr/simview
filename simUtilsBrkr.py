@@ -2,6 +2,7 @@ import xmltodict
 import numpy as np
 import re
 
+
 def getGradEvents(dict):
     time = np.zeros((len(dict["pulseprogram"]["ev"])))
 
@@ -42,24 +43,16 @@ def initNco(nEvents):
     }
 
 
-def turnOffNco(ncos,ncoNumber,t,ind):
-    
-    
+def turnOffNco(ncos, ncoNumber, t, ind):
     ncos[ncoNumber]["t"][ind] = t
-    ncos[ncoNumber]["p0"][ind] = float(ncos[ncoNumber]["p0"][ind-1])if ind>0 else 0
-    ncos[ncoNumber]["p1"][ind] = float(ncos[ncoNumber]["p1"][ind-1])if ind>0 else 0
-    ncos[ncoNumber]["p2"][ind] = float(ncos[ncoNumber]["p2"][ind-1])if ind>0 else 0
+    ncos[ncoNumber]["p0"][ind] = float(ncos[ncoNumber]["p0"][ind - 1]) if ind > 0 else 0
+    ncos[ncoNumber]["p1"][ind] = float(ncos[ncoNumber]["p1"][ind - 1]) if ind > 0 else 0
+    ncos[ncoNumber]["p2"][ind] = float(ncos[ncoNumber]["p2"][ind - 1]) if ind > 0 else 0
     ncos[ncoNumber]["am"][ind] = 0
     ncos[ncoNumber]["pw"][ind] = 0
-    ncos[ncoNumber]["sf"][ind] = float(ncos[ncoNumber]["sf"][ind-1])if ind>0 else 0
+    ncos[ncoNumber]["sf"][ind] = float(ncos[ncoNumber]["sf"][ind - 1]) if ind > 0 else 0
     ncos[ncoNumber]["rgp"][ind] = 0
-    
-    
-        
-        
-        
-        
-    
+
 
 def getRFEvents(dict):
     ncos = {}
@@ -68,47 +61,47 @@ def getRFEvents(dict):
     info["pulProg"] = dict["pulseprogram"]["@path"].split("/")[-1]
     ind = 0
     tUnit = float(dict["pulseprogram"]["@timeunit"])
-    
-    indMaxes={}
-    
-    ncoNumber= None
-    
+
+    indMaxes = {}
+
+    ncoNumber = None
+
     for event in dict["pulseprogram"]["ev"]:
         if "@t" not in event:
             print("Skip event")
             continue
 
-
-
-
         if "@nco" in event:
             if event["@nco"] == "0":
-                turnOffNco(ncos,ncoNumber,float(event["@t"])*tUnit,indMaxes[str(ncoNumber)])
-                indMaxes[ncoNumber]+=1
-                continue    
+                turnOffNco(
+                    ncos,
+                    ncoNumber,
+                    float(event["@t"]) * tUnit,
+                    indMaxes[str(ncoNumber)],
+                )
+                indMaxes[ncoNumber] += 1
+                continue
             ncoNumber = event["@nco"]
         else:
             ncoNumber = str(1)
-        
-
 
         if str(ncoNumber) not in ncos:
             ncos[str(ncoNumber)] = initNco(len(dict["pulseprogram"]["ev"]))
             indMaxes[str(ncoNumber)] = 0
-            
+
         ind = indMaxes[str(ncoNumber)]
-            
+
         ncos[ncoNumber]["t"][ind] = float(event["@t"]) * tUnit
 
         if "@p0" in event:
-            ncos[ncoNumber]["p0"][ind] = float(event["@p0"]) 
+            ncos[ncoNumber]["p0"][ind] = float(event["@p0"])
         else:
             ncos[ncoNumber]["p0"][ind] = (
                 ncos[ncoNumber]["p0"][ind - 1] if ind > 0 else 0
             )
 
         if "@p1" in event:
-            ncos[ncoNumber]["p1"][ind] = float(event["@p1"]) 
+            ncos[ncoNumber]["p1"][ind] = float(event["@p1"])
         else:
             ncos[ncoNumber]["p1"][ind] = (
                 ncos[ncoNumber]["p1"][ind - 1] if ind > 0 else 0
@@ -122,50 +115,47 @@ def getRFEvents(dict):
             )
 
         if "@pw" in event:
-            ncos[ncoNumber]["pw"][ind] = float(event["@pw"]) 
+            ncos[ncoNumber]["pw"][ind] = float(event["@pw"])
         else:
             ncos[ncoNumber]["pw"][ind] = (
                 ncos[ncoNumber]["pw"][ind - 1] if ind > 0 else 0
             )
 
         if "@am" in event:
-            ncos[ncoNumber]["am"][ind] = float(event["@am"]) 
+            ncos[ncoNumber]["am"][ind] = float(event["@am"])
         else:
             ncos[ncoNumber]["am"][ind] = (
                 ncos[ncoNumber]["am"][ind - 1] if ind > 0 else 0
             )
 
         if "@sf" in event:
-            ncos[ncoNumber]["sf"][ind] = float(event["@sf"]) 
+            ncos[ncoNumber]["sf"][ind] = float(event["@sf"])
         else:
             ncos[ncoNumber]["sf"][ind] = (
                 ncos[ncoNumber]["sf"][ind - 1] if ind > 0 else 0
             )
 
         if "@rgp" in event:
-            ncos[ncoNumber]["rgp"][ind] = 1 if '0--0' in event["@rgp"] else 0
-        
-        
-        elif  "@ln" in event:
-            if event["@ln"]=="8000001":
+            ncos[ncoNumber]["rgp"][ind] = 1 if "0--0" in event["@rgp"] else 0
+
+        elif "@ln" in event:
+            if event["@ln"] == "8000001":
                 ncos[ncoNumber]["rgp"][ind] = 0
             else:
                 ncos[ncoNumber]["rgp"][ind] = (
                     ncos[ncoNumber]["rgp"][ind - 1] if ind > 0 else 0
-                )                    
-        else:    
+                )
+        else:
             ncos[ncoNumber]["rgp"][ind] = (
                 ncos[ncoNumber]["rgp"][ind - 1] if ind > 0 else 0
             )
 
-        indMaxes[str(ncoNumber)]+=1
-         
-         
+        indMaxes[str(ncoNumber)] += 1
+
     for ncoKey in ncos:
         for key in ncos[ncoKey]:
             if isinstance(ncos[ncoKey][key], np.ndarray):
-                
-                ncos[ncoKey][key] = ncos[ncoKey][key][:indMaxes[ncoKey]]
+                ncos[ncoKey][key] = ncos[ncoKey][key][: indMaxes[ncoKey]]
 
     return ncos, info
 
@@ -179,16 +169,13 @@ def readRFEvents(path):
     return ncos, info
 
 
-
-
-def readBrkrChannels(path,progress,app):
+def readBrkrChannels(path, progress, app):
     progress.setLabelText("Reading RF Events")
 
     if progress.wasCanceled():
         return
-    
-    ncos, info = readRFEvents(path)
 
+    ncos, info = readRFEvents(path)
 
     app.setWindowTitle(f"{path} originPPG: {info['pulProg']}")
 
@@ -202,10 +189,9 @@ def readBrkrChannels(path,progress,app):
     progress.setValue(50)
 
     progress.setLabelText("Preparing plots gradients")
-    
-    
+
     channels = []
-    
+
     for nco in ncos:
         for key in ncos[nco]:
             if key == "t" or key == "sf":
@@ -219,6 +205,7 @@ def readBrkrChannels(path,progress,app):
                 plotType = "mag"
 
             channelDes = {
+                "chanLabel":"NCO_" + nco + "_" + key,
                 "label": "NCO_" + nco + "_" + key,
                 "type": "NCO",
                 "ind": nco,
@@ -227,66 +214,70 @@ def readBrkrChannels(path,progress,app):
                 "t": ncos[nco]["t"],
                 "data": ncos[nco][key],
             }
-            
-            channelDes["annotations"]=[]
-            
-            if key =="am":
+
+            channelDes["annotations"] = []
+
+            if key == "am":
                 sf = ncos[nco]["sf"]
                 t = ncos[nco]["t"]
 
                 # Compute differences to find where frequency changes
-                dsf = sf - sf[np.where(sf>0)[0][0]]
+                dsf = sf - sf[np.where(sf > 0)[0][0]]
 
                 whenChange = np.abs(np.diff(dsf, prepend=0)) > 0
 
                 # Extract change values and corresponding time points
                 sfChanges = dsf[whenChange]
                 tsfChanges = t[whenChange]
-                if len(sfChanges>0):
-                    channelDes["annotations"].append({"name":"sf","t":tsfChanges,"vals":sfChanges*1e3,"units":"kHz"})
+                if len(sfChanges > 0):
+                    channelDes["annotations"].append(
+                        {
+                            "name": "sf",
+                            "t": tsfChanges,
+                            "vals": sfChanges * 1e3,
+                            "units": "kHz",
+                        }
+                    )
 
-
-                
-            
-            channels.append(channelDes)
-
-    channels.append(
-        {
-            "label": "grads_1_Gx",
-            "type": "grads",
-            "ind": str(0),
-            "key": "Gx",
-            "plotType": "mag",
-            "t": gradTime,
-            "data": grads[0],
-            "annotations":[]
-        }
-    )
+            channels.append([channelDes])
 
     channels.append(
-        {
-            "label": "grads_2_Gy",
-            "type": "grads",
-            "ind": str(1),
-            "key": "Gy",
-            "plotType": "mag",
-            "t": gradTime,
-            "data": grads[1],
-                "annotations":[]
-        }
-    )
-    channels.append(
-        {
-            "label": "grads_3_Gz",
-            "type": "grads",
-            "ind": str(2),
-            "key": "Gz",
-            "plotType": "mag",
-            "t": gradTime,
-            "data": grads[2],
-                "annotations":[]
-        }
+        [
+            {
+                "chanLabel":"Gradients",
+                "label": "Gx",
+                "type": "grads",
+                "ind": str(0),
+                "key": "Gx",
+                "plotType": "mag",
+                "t": gradTime,
+                "data": grads[0],
+                "annotations": [],
+                "pen" :"g"
+            },
+            {
+                "label": "Gy",
+                "type": "grads",
+                "ind": str(1),
+                "key": "Gy",
+                "plotType": "mag",
+                "t": gradTime,
+                "data": grads[1],
+                "annotations": [],
+                "pen" :"r"
+            },
+            {
+                "label": "Gz",
+                "type": "grads",
+                "ind": str(2),
+                "key": "Gz",
+                "plotType": "mag",
+                "t": gradTime,
+                "data": grads[2],
+                "annotations": [],
+                "pen" :"b"
+            },
+        ]
     )
 
-    
     return channels

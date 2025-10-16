@@ -87,6 +87,7 @@ class GUIapp(QMainWindow):
         buttonLayout.addWidget(self.jumpPButton)
 
         buttonLayout.addWidget(self.measureButton)
+        self.measureButton.setFixedHeight(50)
 
         layout = QtWidgets.QVBoxLayout()
         layout.addLayout(buttonLayout)
@@ -107,6 +108,11 @@ class GUIapp(QMainWindow):
 
         # Read a value (with a default)
         self.dataPath = self.settings.value("lastFolder", QDir.homePath())
+        
+        
+        self.leftMenu = QVBoxLayout()
+        
+        self.horizontalLayout_2.insertLayout(0,self.leftMenu)
 
 
     def activate_measure(self):
@@ -217,7 +223,7 @@ class GUIapp(QMainWindow):
         
         self.tMax = 0
         for channel in self.channels:
-            self.tMax = np.maximum(self.tMax, channel["t"][-1].item())
+            self.tMax = np.maximum(self.tMax, channel[0]["t"][-1].item())
 
         self.tMin = 0
         self.sliderScaler = self.tMax / self.tSlider.maximum()
@@ -233,21 +239,19 @@ class GUIapp(QMainWindow):
             plot.showCursor()
 
     def registerCheckBoxes(self):
-        if hasattr(self, "checkBoxLayout"):
-            while self.checkBoxLayout.count():
-                item = self.checkBoxLayout.takeAt(0)
+        if hasattr(self, "leftMenu"):
+            while self.leftMenu.count():
+                item = self.leftMenu.takeAt(0)
                 widget = item.widget()
                 if widget is not None:
                     widget.deleteLater()
 
-        self.checkBoxLayout = QtWidgets.QHBoxLayout()
-
         for channel in self.channels:
             checkBox = QtWidgets.QCheckBox()
-            checkBox.setText(channel["label"])
+            checkBox.setText(channel[0]["chanLabel"])
             checkBox.setChecked(True)
             checkBox.stateChanged.connect(self.checkBoxChanged)
-            self.checkBoxLayout.addWidget(checkBox)
+            self.leftMenu.addWidget(checkBox)
             self.checkBoxes.append(checkBox)
 
     def checkBoxChanged(self):
@@ -286,92 +290,88 @@ class GUIapp(QMainWindow):
         penY = pg.mkPen(color=(200, 200, 0), width=1.5)
 
         pens = [penR, penG, penB, penY]
+        
+        penDict = {"r":penR,"g":penG,"b":penB,"y":penY}
+        
         hasGrads = False
 
         for chanInd, channel in enumerate(self.channels):
-            if (channel["type"] == "grads" and not hasGrads) or channel[
-                "type"
-            ] != "grads":
-                currentPlot = CursorPlot()
-                phaseContainer = QWidget()
-                phaseContainer_layout = QVBoxLayout(phaseContainer)
-                phaseContainer_layout.setContentsMargins(0, 0, 0, 0)
-                phaseContainer_layout.addWidget(currentPlot)
-                vb = currentPlot.getViewBox()
-                vb.setMouseEnabled(x=False, y=True)
-                self.plots.append(currentPlot)
-                self.plotContainers.append(phaseContainer)
-                self.imageLayout.addWidget(phaseContainer, stretch=1)
-                
-                plotItem = currentPlot.getPlotItem()
-                plotItem.showAxis('left', True)
-                plotItem.showAxis('right', True)
-                axis = currentPlot.getPlotItem().getAxis('right')
-                axis.setWidth(50)  # fixed width in pixels
-                axis = currentPlot.getPlotItem().getAxis('left')
-                axis.setWidth(50)  # fixed width in pixels
-            self.checkBoxes[chanInd].contID = len(self.plotContainers) - 1
 
+            currentPlot = CursorPlot()
+            phaseContainer = QWidget()
+            phaseContainer_layout = QVBoxLayout(phaseContainer)
+            phaseContainer_layout.setContentsMargins(0, 0, 0, 0)
+            phaseContainer_layout.addWidget(currentPlot)
+            vb = currentPlot.getViewBox()
+            vb.setMouseEnabled(x=False, y=True)
+            self.plots.append(currentPlot)
+            self.plotContainers.append(phaseContainer)
+            self.imageLayout.addWidget(phaseContainer, stretch=1)
+            
+            plotItem = currentPlot.getPlotItem()
+            plotItem.showAxis('left', True)
+            plotItem.showAxis('right', True)
+            axis = currentPlot.getPlotItem().getAxis('right')
+            axis.setWidth(50)  # fixed width in pixels
+            axis = currentPlot.getPlotItem().getAxis('left')
+            axis.setWidth(50)  # fixed width in pixels
+                
+            self.checkBoxes[chanInd].contID = len(self.plotContainers) - 1
+            
+            
             if chanInd >= len(self.channels) - 1:
                 currentPlot.setLabel("bottom", "Time (s)")
 
-            stepData = self.convertToStep(channel, "data")
-
-            if np.sum(np.abs(stepData["data"])) == 0:
-                phaseContainer.hide()
-                self.checkBoxes[chanInd].blockSignals(True)
-                self.checkBoxes[chanInd].setChecked(False)
-                self.checkBoxes[chanInd].blockSignals(False)
-
-            if channel["plotType"] == "phase":
+            if channel[0]["plotType"] == "phase":
                 currentPlot.setYRange(0, 360)
-
-            if channel["type"] == "grads" and not hasGrads:
+            
+            if len(channel)>1:
                 currentPlot.addLegend(offset=(10, 10))
-                currentPlot.setLabel("bottom", "Time (s)")
+            
+            for line in channel:
+                stepData = self.convertToStep(line, "data")
 
-            if channel["type"] != "grads":
-                currentPlot.setLabel("right", channel["label"])
+                if np.sum(np.abs(stepData["data"])) == 0:
+                    phaseContainer.hide()
+                    self.checkBoxes[chanInd].blockSignals(True)
+                    self.checkBoxes[chanInd].setChecked(False)
+                    self.checkBoxes[chanInd].blockSignals(False)
+
+                currentPlot.setLabel("right", line["label"])
+                
+                
+                currentPen = line.get("pen",pens[chanInd % 4])
+                
                 currentPlot.plot(
                     stepData["t"],
                     stepData["data"],
-                    name=channel["label"],
-                    pen=pens[chanInd % 4],
-                )
-            else:
-                hasGrads = True
-                currentPlot.setLabel("right", "Grads")
-                currentPlot.plot(
-                    stepData["t"],
-                    stepData["data"],
-                    name=channel["key"],
-                    pen=pens[chanInd % 4],
+                    name=line["label"],
+                    pen=currentPen,
                 )
 
-            if len(channel["annotations"]) > 0:
-                for annotation in channel["annotations"]:
-                    for ind, t in enumerate(annotation["t"]):
-                        line = pg.InfiniteLine(
-                            pos=t,
-                            angle=90,
-                            pen=pg.mkPen("r", style=Qt.PenStyle.DashLine),
-                        )
-                        currentPlot.addItem(line)
+                if len(line["annotations"]) > 0:
+                    for annotation in line["annotations"]:
+                        for ind, t in enumerate(annotation["t"]):
+                            line = pg.InfiniteLine(
+                                pos=t,
+                                angle=90,
+                                pen=pg.mkPen("r", style=Qt.PenStyle.DashLine),
+                            )
+                            currentPlot.addItem(line)
 
-                        text = pg.TextItem(
-                            f"f = {annotation['vals'][ind]:.2f} {annotation['units']}",
-                            anchor=(0, 0),
-                            color="r",
-                        )
-                        text.setPos(t, 110)  # adjust vertical offset if needed
-                        currentPlot.addItem(text)
+                            text = pg.TextItem(
+                                f"f = {annotation['vals'][ind]:.2f} {annotation['units']}",
+                                anchor=(0, 0),
+                                color="r",
+                            )
+                            text.setPos(t, 110)  # adjust vertical offset if needed
+                            currentPlot.addItem(text)
 
         self.updateView()
 
         self.tSlider.setValue(int(self.tPos / self.sliderScaler))
 
         self.imageLayout.addLayout(self.navigation)
-        self.imageLayout.addLayout(self.checkBoxLayout)
 
 
 if __name__ == "__main__":
