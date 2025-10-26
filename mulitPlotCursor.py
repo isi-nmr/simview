@@ -186,7 +186,7 @@ class CursorPlot(pg.PlotWidget):
                     nearest_idx = 0
                     
                 # nearest_idx = np.abs(cx - x_val).argmin()
-                yS.append(cy[nearest_idx+1])
+                yS.append(cy[np.minimum(nearest_idx+1,cy.size-1)])
                 names.append(curve.name() or "Unnamed")
 
                 label += f"{names[-1]}:{yS[-1]:.2f} "
