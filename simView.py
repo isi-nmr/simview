@@ -249,9 +249,6 @@ class GUIapp(QMainWindow):
         else:
              self.channels = readNMRScopeBChannels(data, progress, self)     
             
-            
-        
-        
         self.tMax = 0
         for channel in self.channels:
             self.tMax = np.maximum(self.tMax, channel[0]["t"][-1].item())
@@ -260,6 +257,11 @@ class GUIapp(QMainWindow):
         self.sliderScaler = self.tMax / self.tSlider.maximum()
 
         self.registerCheckBoxes()
+        
+        
+        self.tPos = self.tMax/2
+        self.windowWidth = self.tMax/2
+        
 
         self.initPlots()
         progress.setValue(90)
