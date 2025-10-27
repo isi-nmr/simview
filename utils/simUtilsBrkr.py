@@ -1,10 +1,12 @@
-import xmltodict
-import numpy as np
 import re
 
+import numpy as np
+import xmltodict
+from PyQt6.QtWidgets import QMainWindow, QProgressDialog
 
-def getGradEvents(dict):
-    time = np.zeros((len(dict["pulseprogram"]["ev"])))
+
+def getGradEvents(dict: dict) -> tuple[np.ndarray, np.ndarray]:
+    time = np.zeros(len(dict["pulseprogram"]["ev"]))
 
     tUnit = float(dict["pulseprogram"]["@timeunit"])
 
@@ -21,7 +23,7 @@ def getGradEvents(dict):
     return time[:ind], grads[:, :ind]
 
 
-def readGrads(path):
+def readGrads(path: str) -> tuple[np.ndarray, np.ndarray]:
     with open(path + "/" + "_GCube.xml") as f:
         gCube = xmltodict.parse(f.read())
 
@@ -30,7 +32,7 @@ def readGrads(path):
     return time, grads
 
 
-def initNco(nEvents):
+def initNco(nEvents: int) -> dict:
     return {
         "t": np.zeros(nEvents),
         "p0": np.zeros(nEvents),
@@ -43,7 +45,7 @@ def initNco(nEvents):
     }
 
 
-def turnOffNco(ncos, ncoNumber, t, ind):
+def turnOffNco(ncos: dict, ncoNumber: int, t: np.ndarray, ind: int) -> None:
     ncos[ncoNumber]["t"][ind] = t
     ncos[ncoNumber]["p0"][ind] = float(ncos[ncoNumber]["p0"][ind - 1]) if ind > 0 else 0
     ncos[ncoNumber]["p1"][ind] = float(ncos[ncoNumber]["p1"][ind - 1]) if ind > 0 else 0
@@ -54,7 +56,7 @@ def turnOffNco(ncos, ncoNumber, t, ind):
     ncos[ncoNumber]["rgp"][ind] = 0
 
 
-def getRFEvents(dict):
+def getRFEvents(dict: dict) -> tuple[dict, dict]:
     ncos = {}
 
     info = {}
@@ -96,44 +98,32 @@ def getRFEvents(dict):
         if "@p0" in event:
             ncos[ncoNumber]["p0"][ind] = float(event["@p0"])
         else:
-            ncos[ncoNumber]["p0"][ind] = (
-                ncos[ncoNumber]["p0"][ind - 1] if ind > 0 else 0
-            )
+            ncos[ncoNumber]["p0"][ind] = ncos[ncoNumber]["p0"][ind - 1] if ind > 0 else 0
 
         if "@p1" in event:
             ncos[ncoNumber]["p1"][ind] = float(event["@p1"])
         else:
-            ncos[ncoNumber]["p1"][ind] = (
-                ncos[ncoNumber]["p1"][ind - 1] if ind > 0 else 0
-            )
+            ncos[ncoNumber]["p1"][ind] = ncos[ncoNumber]["p1"][ind - 1] if ind > 0 else 0
 
         if "@p2" in event:
             ncos[ncoNumber]["p2"][ind] = float(event["@p2"])
         else:
-            ncos[ncoNumber]["p2"][ind] = (
-                ncos[ncoNumber]["p2"][ind - 1] if ind > 0 else 0
-            )
+            ncos[ncoNumber]["p2"][ind] = ncos[ncoNumber]["p2"][ind - 1] if ind > 0 else 0
 
         if "@pw" in event:
             ncos[ncoNumber]["pw"][ind] = float(event["@pw"])
         else:
-            ncos[ncoNumber]["pw"][ind] = (
-                ncos[ncoNumber]["pw"][ind - 1] if ind > 0 else 0
-            )
+            ncos[ncoNumber]["pw"][ind] = ncos[ncoNumber]["pw"][ind - 1] if ind > 0 else 0
 
         if "@am" in event:
             ncos[ncoNumber]["am"][ind] = float(event["@am"])
         else:
-            ncos[ncoNumber]["am"][ind] = (
-                ncos[ncoNumber]["am"][ind - 1] if ind > 0 else 0
-            )
+            ncos[ncoNumber]["am"][ind] = ncos[ncoNumber]["am"][ind - 1] if ind > 0 else 0
 
         if "@sf" in event:
             ncos[ncoNumber]["sf"][ind] = float(event["@sf"])
         else:
-            ncos[ncoNumber]["sf"][ind] = (
-                ncos[ncoNumber]["sf"][ind - 1] if ind > 0 else 0
-            )
+            ncos[ncoNumber]["sf"][ind] = ncos[ncoNumber]["sf"][ind - 1] if ind > 0 else 0
 
         if "@rgp" in event:
             ncos[ncoNumber]["rgp"][ind] = 1 if "0--0" in event["@rgp"] else 0
@@ -142,25 +132,21 @@ def getRFEvents(dict):
             if event["@ln"] == "8000001":
                 ncos[ncoNumber]["rgp"][ind] = 0
             else:
-                ncos[ncoNumber]["rgp"][ind] = (
-                    ncos[ncoNumber]["rgp"][ind - 1] if ind > 0 else 0
-                )
+                ncos[ncoNumber]["rgp"][ind] = ncos[ncoNumber]["rgp"][ind - 1] if ind > 0 else 0
         else:
-            ncos[ncoNumber]["rgp"][ind] = (
-                ncos[ncoNumber]["rgp"][ind - 1] if ind > 0 else 0
-            )
+            ncos[ncoNumber]["rgp"][ind] = ncos[ncoNumber]["rgp"][ind - 1] if ind > 0 else 0
 
         indMaxes[str(ncoNumber)] += 1
 
-    for ncoKey in ncos:
-        for key in ncos[ncoKey]:
-            if isinstance(ncos[ncoKey][key], np.ndarray):
-                ncos[ncoKey][key] = ncos[ncoKey][key][: indMaxes[ncoKey]]
+    for ncoKey, subDict in ncos.items():
+        for key, value in subDict.items():
+            if isinstance(value, np.ndarray):
+                subDict[key] = value[: indMaxes[ncoKey]]
 
     return ncos, info
 
 
-def readRFEvents(path):
+def readRFEvents(path: str) -> tuple[dict, dict]:
     with open(path + "/" + "_FCube1.xml") as f:
         gCube = xmltodict.parse(f.read())
 
@@ -169,18 +155,18 @@ def readRFEvents(path):
     return ncos, info
 
 
-def readBrkrChannels(path, progress, app):
+def readBrkrChannels(path: str, progress: QProgressDialog, app: QMainWindow)->dict:
     progress.setLabelText("Reading RF Events")
 
     if progress.wasCanceled():
-        return
+        return None
 
     ncos, info = readRFEvents(path)
 
     app.setWindowTitle(f"{path} originPPG: {info['pulProg']}")
 
     if progress.wasCanceled():
-        return
+        return None
     progress.setValue(40)
     progress.setLabelText("Reading gradients")
 
@@ -194,7 +180,7 @@ def readBrkrChannels(path, progress, app):
 
     for nco in ncos:
         for key in ncos[nco]:
-            if key == "t" or key == "sf":
+            if key in {"t", "sf"}:
                 continue
 
             if re.match(r"p\d", key):
@@ -205,7 +191,7 @@ def readBrkrChannels(path, progress, app):
                 plotType = "mag"
 
             channelDes = {
-                "chanLabel":"NCO_" + nco + "_" + key,
+                "chanLabel": "NCO_" + nco + "_" + key,
                 "label": "NCO_" + nco + "_" + key,
                 "type": "NCO",
                 "ind": nco,
@@ -244,7 +230,7 @@ def readBrkrChannels(path, progress, app):
     channels.append(
         [
             {
-                "chanLabel":"Gradients",
+                "chanLabel": "Gradients",
                 "label": "Gx",
                 "type": "grads",
                 "ind": str(0),
@@ -253,7 +239,7 @@ def readBrkrChannels(path, progress, app):
                 "t": gradTime,
                 "data": grads[0],
                 "annotations": [],
-                "pen" :"g"
+                "pen": "g",
             },
             {
                 "label": "Gy",
@@ -264,7 +250,7 @@ def readBrkrChannels(path, progress, app):
                 "t": gradTime,
                 "data": grads[1],
                 "annotations": [],
-                "pen" :"r"
+                "pen": "r",
             },
             {
                 "label": "Gz",
@@ -275,7 +261,7 @@ def readBrkrChannels(path, progress, app):
                 "t": gradTime,
                 "data": grads[2],
                 "annotations": [],
-                "pen" :"b"
+                "pen": "b",
             },
         ]
     )

@@ -1,16 +1,18 @@
+import os
 import sys
 from pathlib import Path
-from simUtilsBrkr import readBrkrChannels
-from simUtilsNMRScopeB import readNMRScopeBChannels
+
 import numpy as np
 import pyqtgraph as pg
-from PyQt6 import QtWidgets, uic, QtGui
-from PyQt6.QtCore import Qt, QSettings, QDir, QCoreApplication
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout
+from PyQt6 import QtGui, QtWidgets, uic
+from PyQt6.QtCore import QCoreApplication, QDir, QSettings, Qt
+from PyQt6.QtGui import QPalette
+from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
 
-import os
-
-from mulitPlotCursor import CursorPlot
+from utils import dialog, multiplot
+from utils.simUtilsBrkr import readBrkrChannels
+from utils.simUtilsNMRScopeB import readNMRScopeBChannels
+from widgets.mulitPlotCursor import CursorPlot
 
 
 class GUIapp(QMainWindow):
@@ -18,14 +20,18 @@ class GUIapp(QMainWindow):
     sliderScaler = 1
 
     highlightRect = None
-    plots: list["CursorPlot"] = []
-    channels = []
-    checkBoxes = []
-    plotContainers = []
-    selectedChannels = []
 
-    def __init__(self, simPath=None,data=None):
+    darkMode = False
+
+    def __init__(self, simPath: str | None = None, data: dict | None = None) -> None:
         super().__init__()
+
+        self.plots: list[CursorPlot] = []
+        self.channels = []
+        self.checkBoxes: list[QtWidgets.QCheckBox] = []
+        self.plotContainers = []
+        self.selectedChannels = []
+
         path = Path(__file__).resolve().parent / "visusimForm.ui"
         uic.loadUi(path, self)
 
@@ -107,102 +113,83 @@ class GUIapp(QMainWindow):
         # Create settings object
         self.settings = QSettings("MR_ISIBrno", "BrukerSimView")
 
+        self.selectedChannels = self.settings.value("selectedChannels", [])
 
-        self.selectedChannels = self.settings.value("selectedChannels",[])
-        
         self.leftMenu = QVBoxLayout()
-        
-        self.horizontalLayout_2.insertLayout(0,self.leftMenu)
+
+        self.horizontalLayout_2.insertLayout(0, self.leftMenu)
+
+        palette = app.palette()
+        base_color = palette.color(QPalette.ColorRole.Base)
+        self.darkMode = base_color.value() < 128  # value() gives brightness (0-255)
+
+        if self.darkMode:
+            pg.setConfigOption("background", "black")
+            pg.setConfigOption("foreground", "white")
+        else:
+            pg.setConfigOption("background", "white")
+            pg.setConfigOption("foreground", "black")
 
         # Read a value (with a default)
         if self.dataPath is None:
             self.dataPath = self.settings.value("lastFolder", QDir.homePath())
         else:
             self.loadData()
-            
+
         if data is not None:
-            self.loadData(data)    
+            self.loadData(data)
 
-    def activate_measure(self):
+    def activate_measure(self) -> None:
         for plot in self.plots:
-            plot.enable_measure_mode(True)
+            plot.enable_measure_mode(enabled=True)
 
-    def open_folder(self):
-        folder_path = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Select Simulation output folder", self.dataPath
-        )
-        if folder_path:
-            self.dataPath = folder_path
-            if os.path.exists(self.dataPath + "/" + "pulse_seq.json"):
-                # NMRScopeBPath
-                self.settings.setValue("lastFolder", self.dataPath)
-                self.loadData()
-                return
-            
-            if not os.path.exists(self.dataPath + "/" + "_GCube.xml"):
-                self.showErrorMessage("No GCube file found in folder!")
-                return
+    def open_folder(self) -> None:
+        folder_path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Simulation output folder", self.dataPath)
+        if not folder_path:
+            return
 
-            if not os.path.exists(self.dataPath + "/" + "_FCube1.xml"):
-                self.showErrorMessage("No GCube file found in folder!")
-                return
-
+        self.dataPath = folder_path
+        if os.path.exists(self.dataPath + "/" + "pulse_seq.json"):
+            # NMRScopeBPath
             self.settings.setValue("lastFolder", self.dataPath)
-
             self.loadData()
+            return
 
-    def zoomIn(self):
+        if not os.path.exists(self.dataPath + "/" + "_GCube.xml"):
+            dialog.showErrorMessage("No GCube file found in folder!")
+            return
+
+        if not os.path.exists(self.dataPath + "/" + "_FCube1.xml"):
+            dialog.showErrorMessage("No GCube file found in folder!")
+            return
+
+        self.settings.setValue("lastFolder", self.dataPath)
+
+        self.loadData()
+
+    def zoomIn(self) -> None:
         self.windowWidth *= 0.8
         self.updateView()
 
-    def zoomOut(self):
+    def zoomOut(self) -> None:
         self.windowWidth /= 0.8
         self.updateView()
 
-    def askYesNo(self, text):
-        # Create a message box
-        msg_box = QtWidgets.QMessageBox()
-        msg_box.setIcon(QtWidgets.QMessageBox.Icon.Question)  # Set the icon to Question
-        msg_box.setWindowTitle("Confirmation")  # Set the title of the message box
-        msg_box.setText(text)  # Main question
-        msg_box.setStandardButtons(
-            QtWidgets.QMessageBox.StandardButton.Yes
-            | QtWidgets.QMessageBox.StandardButton.No
-        )  # Add Yes and No buttons
-
-        user_choice = msg_box.exec()
-
-        return user_choice == QtWidgets.QMessageBox.StandardButton.Yes
-
-    def showErrorMessage(self, errorMessage):
-        # Create a message box
-        msg_box = QtWidgets.QMessageBox()
-        msg_box.setIcon(
-            QtWidgets.QMessageBox.Icon.Critical
-        )  # Set the icon to Critical (error)
-        msg_box.setWindowTitle("Error")  # Set the title of the message box
-        msg_box.setText("An error occurred!")  # Set the main text
-        msg_box.setInformativeText(errorMessage)  # Optional additional text
-        msg_box.setStandardButtons(
-            QtWidgets.QMessageBox.StandardButton.Ok
-        )  # Add standard buttons
-        msg_box.exec()  # Display the message box
-
-    def changeXRange(self):
+    def changeXRange(self) -> None:
         self.tPos = self.tSlider.value() * self.sliderScaler
         self.updateView()
 
-    def jumpXPos(self):
+    def jumpXPos(self) -> None:
         self.tPos = np.minimum(self.tMax, self.tPos + self.windowWidth * 0.5)
         self.tSlider.setValue(int(self.tPos / self.sliderScaler))
         self.updateView()
 
-    def jumpXNeg(self):
+    def jumpXNeg(self) -> None:
         self.tPos = np.maximum(self.tMin, self.tPos - self.windowWidth * 0.5)
         self.tSlider.setValue(int(self.tPos / self.sliderScaler))
         self.updateView()
 
-    def updateView(self):
+    def updateView(self) -> None:
         rangePos = self.tPos + self.windowWidth * 0.5
         rangeNeg = self.tPos - self.windowWidth * 0.5
 
@@ -211,31 +198,27 @@ class GUIapp(QMainWindow):
 
         self.settings.setValue("tPos", self.tPos)
         self.settings.setValue("windowWidth", self.windowWidth)
-        
-    def resetApp(self):
+
+    def resetApp(self) -> None:
         if self.plotContainers:
             for container in self.plotContainers:
                 # Remove widget from layout
                 self.layout().removeWidget(container)
-                
+
                 # Delete the widget properly
                 container.setParent(None)
                 container.deleteLater()
-        
+
         self.plotContainers = []
-        
+
         self.plots = []
         self.checkBoxes = []
-        self.channels = []        
+        self.channels = []
 
-    def loadData(self,data=None):
-        
+    def loadData(self, data: str | None = None) -> None:
         self.resetApp()
 
-
-        progress = QtWidgets.QProgressDialog(
-            "Parsing simulation data ...", "Cancel", 0, 100, self
-        )
+        progress = QtWidgets.QProgressDialog("Parsing simulation data ...", "Cancel", 0, 100, self)
         progress.setWindowTitle("Please Wait")
         progress.setWindowModality(Qt.WindowModality.ApplicationModal)
         progress.setMinimumDuration(0)  # show immediately
@@ -243,15 +226,14 @@ class GUIapp(QMainWindow):
         progress.setValue(5)
         QCoreApplication.processEvents()
 
-        
         if data is None:
             if os.path.exists(self.dataPath + "/" + "pulse_seq.json"):
-                self.channels = readNMRScopeBChannels(self.dataPath, progress, self)        
+                self.channels = readNMRScopeBChannels(self.dataPath, progress, self)
             else:
                 self.channels = readBrkrChannels(self.dataPath, progress, self)
         else:
-             self.channels = readNMRScopeBChannels(data, progress, self)     
-            
+            self.channels = readNMRScopeBChannels(data, progress, self)
+
         self.tMax = 0
         for channel in self.channels:
             self.tMax = np.maximum(self.tMax, channel[0]["t"][-1].item())
@@ -260,21 +242,18 @@ class GUIapp(QMainWindow):
         self.sliderScaler = self.tMax / self.tSlider.maximum()
 
         self.registerCheckBoxes()
-        
-        self.tPos = float(self.settings.value("tPos",self.tMax/2))
-        self.windowWidth = float(self.settings.value("windowWidth",self.tMax/2))
-        
+
+        self.tPos = float(self.settings.value("tPos", self.tMax / 2))
+        self.windowWidth = float(self.settings.value("windowWidth", self.tMax / 2))
 
         self.initPlots()
         progress.setValue(90)
         progress.close()
-        
 
         for plot in self.plots:
             plot.showCursor()
 
-        
-    def registerCheckBoxes(self):
+    def registerCheckBoxes(self) -> None:
         if hasattr(self, "leftMenu"):
             while self.leftMenu.count():
                 item = self.leftMenu.takeAt(0)
@@ -290,9 +269,7 @@ class GUIapp(QMainWindow):
             self.leftMenu.addWidget(checkBox)
             self.checkBoxes.append(checkBox)
 
-    def checkBoxChanged(self):
-
-
+    def checkBoxChanged(self) -> None:
         for checkBox in self.checkBoxes:
             if not checkBox.isChecked():
                 if checkBox.text() in self.selectedChannels:
@@ -303,54 +280,15 @@ class GUIapp(QMainWindow):
                     self.selectedChannels.append(checkBox.text())
                 self.plotContainers[checkBox.contID].show()
 
-        
-        
         self.settings.setValue("selectedChannels", self.selectedChannels)
-        
-    def makeStepArrs(self, tArr, multArr):
-        stepTime = np.repeat(tArr, 2)[1:]
-        stepGrads = np.repeat(multArr, 2, -1)[:, :-1]
 
-        return stepTime, stepGrads
-
-    def convertToStep(self, dict, key):
-        newDict = {}
-        newDict["t"] = np.repeat(dict["t"], 2)[1:]
-
-        if not isinstance(dict[key], np.ndarray):
-            newDict[key] = dict[key]
-
-        else:
-            newDict[key] = np.repeat(dict[key], 2, -1)[:-1]
-
-        return newDict
-
-    def initPlots(self):
+    def initPlots(self) -> None:
         self.imageLayout.removeItem(self.navigation)
 
-        penR = pg.mkPen(color=(240, 0, 0), width=1.5)
-        penG = pg.mkPen(color=(0, 240, 0), width=1.5)
-        penB = pg.mkPen(color=(0, 0, 240), width=1.5)
-        penY = pg.mkPen(color=(200, 200, 0), width=1.5)
-        penC = pg.mkPen(color=(0, 200, 200), width=1.5)    # Cyan
-        penM = pg.mkPen(color=(200, 0, 200), width=1.5)    # Magenta
-        penO = pg.mkPen(color=(255, 128, 0), width=1.5)    # Orange
-        penP = pg.mkPen(color=(150, 0, 150), width=1.5)    # Purple
-        penTeal = pg.mkPen(color=(0, 150, 120), width=1.5) # Teal
-        penPink = pg.mkPen(color=(255, 105, 180), width=1.5)# Pink
-        penGray = pg.mkPen(color=(128, 128, 128), width=1.5)# Gray
-        penBrown = pg.mkPen(color=(139, 69, 19), width=1.5)# Brown
-
-        pens = [penR, penG, penB, penY, penC, penM, penO, penP, penTeal, penPink, penGray, penBrown]
-        
-        
-        penDict = {"r":penR,"g":penG,"b":penB,"y":penY}
-        
-
+        pens, penDict = multiplot.makePens()
 
         for chanInd, channel in enumerate(self.channels):
-
-            currentPlot = CursorPlot()
+            currentPlot = CursorPlot(darkMode=self.darkMode)
             phaseContainer = QWidget()
             phaseContainer_layout = QVBoxLayout(phaseContainer)
             phaseContainer_layout.setContentsMargins(0, 0, 0, 0)
@@ -360,59 +298,55 @@ class GUIapp(QMainWindow):
             self.plots.append(currentPlot)
             self.plotContainers.append(phaseContainer)
             self.imageLayout.addWidget(phaseContainer, stretch=1)
-            
+
             plotItem = currentPlot.getPlotItem()
-            plotItem.showAxis('left', True)
-            plotItem.showAxis('right', True)
-            axis = currentPlot.getPlotItem().getAxis('right')
+            plotItem.showAxis("left", show=True)
+            plotItem.showAxis("right", show=True)
+            axis = currentPlot.getPlotItem().getAxis("right")
             axis.setWidth(60)  # fixed width in pixels
-            axis = currentPlot.getPlotItem().getAxis('left')
+            axis = currentPlot.getPlotItem().getAxis("left")
             axis.setWidth(60)  # fixed width in pixels
-                
+
             self.checkBoxes[chanInd].contID = len(self.plotContainers) - 1
-            
-            
+
             if chanInd >= len(self.channels) - 1:
                 currentPlot.setLabel("bottom", "Time (s)")
 
             if channel[0]["plotType"] == "phase":
-                if channel[0].get("units","deg") !="rad": 
+                if channel[0].get("units", "deg") != "rad":
                     currentPlot.setYRange(0, 360)
                 else:
                     currentPlot.setYRange(-np.pi, np.pi)
-                    
-            if len(channel)>1:
+
+            if len(channel) > 1:
                 currentPlot.addLegend(offset=(10, 10))
-            
+
             currentPlot.setLabel("right", channel[0]["chanLabel"])
 
             if np.sum(np.abs(channel[0]["data"])) == 0:
                 phaseContainer.hide()
-                self.checkBoxes[chanInd].blockSignals(True)
+                self.checkBoxes[chanInd].blockSignals(True)  # noqa: FBT003
                 self.checkBoxes[chanInd].setChecked(False)
-                self.checkBoxes[chanInd].blockSignals(False)
-            
-            
-                
-            if self.selectedChannels != []:            
+                self.checkBoxes[chanInd].blockSignals(False)  # noqa: FBT003
+
+            if self.selectedChannels != []:
                 if channel[0]["chanLabel"] in self.selectedChannels:
                     phaseContainer.show()
-                    self.checkBoxes[chanInd].blockSignals(True)
+                    self.checkBoxes[chanInd].blockSignals(True)  # noqa: FBT003
                     self.checkBoxes[chanInd].setChecked(True)
-                    self.checkBoxes[chanInd].blockSignals(False)
+                    self.checkBoxes[chanInd].blockSignals(False)  # noqa: FBT003
                 else:
                     phaseContainer.hide()
-                    self.checkBoxes[chanInd].blockSignals(True)
+                    self.checkBoxes[chanInd].blockSignals(True)  # noqa: FBT003
                     self.checkBoxes[chanInd].setChecked(False)
-                    self.checkBoxes[chanInd].blockSignals(False)  
-                    
-                                      
-            for lineInd, line in enumerate(channel):
-                stepData = self.convertToStep(line, "data")
-                currentPen = line.get("pen",pens[chanInd % len(pens)])
-                
+                    self.checkBoxes[chanInd].blockSignals(False)  # noqa: FBT003
+
+            for _, line in enumerate(channel):
+                stepData = multiplot.convertToStep(line, "data")
+                currentPen = line.get("pen", pens[chanInd % len(pens)])
+
                 if type(currentPen) is str:
-                    currentPen=penDict[currentPen]
+                    currentPen = penDict[currentPen]
 
                 currentPlot.plot(
                     stepData["t"],
@@ -422,22 +356,7 @@ class GUIapp(QMainWindow):
                 )
 
                 if len(line["annotations"]) > 0:
-                    for annotation in line["annotations"]:
-                        for ind, t in enumerate(annotation["t"]):
-                            line = pg.InfiniteLine(
-                                pos=t,
-                                angle=90,
-                                pen=pg.mkPen("r", style=Qt.PenStyle.DashLine),
-                            )
-                            currentPlot.addItem(line)
-
-                            text = pg.TextItem(
-                                f"f = {annotation['vals'][ind]:.2f} {annotation['units']}",
-                                anchor=(0, 0),
-                                color="r",
-                            )
-                            text.setPos(t, 110)  # adjust vertical offset if needed
-                            currentPlot.addItem(text)
+                    multiplot.addAnnotations(line, currentPlot)
 
         self.updateView()
 
@@ -446,25 +365,18 @@ class GUIapp(QMainWindow):
         self.imageLayout.addLayout(self.navigation)
 
 
-
-def show_graphs_from_dict(data):
+def show_graphs_from_dict(data: dict) -> None:
     app = QApplication(sys.argv)  # ✅ Must be first
     gui = GUIapp(data=data)  # ✅ Now it's safe
     gui.show()
     sys.exit(app.exec())
-    
-    
-    
-    
+
 
 if __name__ == "__main__":
     inputArgs = sys.argv
 
-    if len(sys.argv)>1:
-        path = sys.argv[1] 
-    else:
-        path = None
-        
+    path = sys.argv[1] if len(sys.argv) > 1 else None
+
     app = QApplication(sys.argv)  # ✅ Must be first
     gui = GUIapp(path)  # ✅ Now it's safe
     gui.show()

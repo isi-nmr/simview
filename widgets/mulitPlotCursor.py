@@ -1,15 +1,17 @@
-
-import pyqtgraph as pg
 import numpy as np
-from PyQt6.QtGui import QColor,QPainter
+import pyqtgraph as pg
+from PyQt6.QtCore import QPointF
+from PyQt6.QtGui import QColor, QMouseEvent, QPainter
 
 
 class TextItemWithBg(pg.TextItem):
-    def __init__(self, text="", color="w", bg_color=QColor(0,0,0,150), **kwargs):
+    def __init__(self, text:str="", color:str="w", bg_color:QColor|None=None, **kwargs:dict)->None:
         super().__init__(text, color=color, **kwargs)
+        if bg_color is None:
+            bg_color = QColor(0, 0, 0, 150)
         self.bg_color = bg_color
 
-    def paint(self, p: QPainter, *args):
+    def paint(self, p: QPainter, *args:tuple)->None:
         # Draw background rectangle
         rect = self.boundingRect()
         p.fillRect(rect, self.bg_color)
@@ -20,24 +22,22 @@ class TextItemWithBg(pg.TextItem):
 class CursorPlot(pg.PlotWidget):
     """A PlotWidget with its own vertical cursor line."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args:tuple, darkMode:bool=False, **kwargs:dict)->None:
         super().__init__(*args, **kwargs)
 
         # Create the vertical line cursor
-        self.cursor_line = pg.InfiniteLine(
-            angle=90, movable=False, pen=pg.mkPen("r", width=1)
-        )
+        self.cursor_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("r", width=1))
         self.cursor_line.hide()
         self.addItem(self.cursor_line)
 
-        self.timestamp_label = TextItemWithBg("", anchor=(1, 0), color="r")
-        self.timestamp_label.setZValue(100) 
+        bgColor = QColor(0, 0, 0, 150) if darkMode else QColor(0, 0, 0, 10)
+
+        self.timestamp_label = TextItemWithBg("", anchor=(1, 0), color="r", bg_color=bgColor)
+        self.timestamp_label.setZValue(100)
         self.addItem(self.timestamp_label, ignoreBounds=True)
 
-        self.point_label =TextItemWithBg("", anchor=(1, 0), color="r")
-        self.point_label.setZValue(100) 
-        
-
+        self.point_label = TextItemWithBg("", anchor=(1, 0), color="r", bg_color=bgColor)
+        self.point_label.setZValue(100)
 
         self.addItem(self.point_label, ignoreBounds=True)
 
@@ -59,17 +59,19 @@ class CursorPlot(pg.PlotWidget):
         self.zoom_start_x = None
         self.zoom_region_temp = None
 
-    def mousePressEvent(self, event):
+        self.timestamp_label.hide()
+        self.point_label.hide()
+
+    def mousePressEvent(self, event:QMouseEvent)->None:
         mouse_point = self.getViewBox().mapSceneToView(event.position())
         if self.measure_mode:
             if self.start_x is None:
-                
                 if hasattr(self.parent().parent().parent(), "plots"):
                     for other in self.parent().parent().parent().plots:
                         if other == self:
                             continue
                         other.measure_mode = False
-                        
+
                 # First click → start measuring
                 self.start_x = mouse_point.x()
 
@@ -96,8 +98,6 @@ class CursorPlot(pg.PlotWidget):
                         other.start_x = None
                         other.measure_mode = False
 
-
-
         elif self.zoom_mode:
             self.zoom_start_x = mouse_point.x()
             # create temporary region
@@ -122,7 +122,10 @@ class CursorPlot(pg.PlotWidget):
         else:
             super().mousePressEvent(event)
 
-    def enable_measure_mode(self, enabled=True):
+    def enable_measure_mode(self,*, enabled:None|bool=None)->None:
+        if enabled is None:
+            enabled = True
+
         """Activate measurement mode and clear previous measurement."""
         self.measure_mode = enabled
         self.start_x = None
@@ -135,14 +138,17 @@ class CursorPlot(pg.PlotWidget):
             self.removeItem(self.temp_text)
             self.temp_text = None
 
-    def enable_zoom_mode(self, enabled=True):
+    def enable_zoom_mode(self,*, enabled:None|bool=None)->None:
+        if enabled is None:
+            enabled = True
+
         self.zoom_mode = enabled
         self.zoom_start_x = None
         if self.zoom_region_temp:
             self.removeItem(self.zoom_region_temp)
             self.zoom_region_temp = None
 
-    def get_curves(self):
+    def get_curves(self)->list:
         """
         Returns a list of tuples: (PlotDataItem, x_data, y_data)
         """
@@ -152,7 +158,7 @@ class CursorPlot(pg.PlotWidget):
             curves.append((item, x, y))
         return curves
 
-    def on_mouse_moved(self, pos):
+    def on_mouse_moved(self, pos:QPointF)->None:
         if self.zoom_mode and self.zoom_start_x is not None:
             mouse_point = self.getViewBox().mapSceneToView(pos)
             x = mouse_point.x()
@@ -174,28 +180,25 @@ class CursorPlot(pg.PlotWidget):
             yS = []
             names = []
             label = ""
-            for idx, (curve, cx, cy) in enumerate(self.get_curves()):
+            for _, (curve, cx, cy) in enumerate(self.get_curves()):
                 # Find nearest index
-                
+
                 mask = cx <= x_val
-                if np.any(mask):
+                if np.any(mask):  # noqa: SIM108
                     # Pick the last index where cx is less than or equal to x_val
                     nearest_idx = np.where(mask)[0][-1]
                 else:
                     # Fallback: all cx are greater, so pick the first one
                     nearest_idx = 0
-                    
+
                 # nearest_idx = np.abs(cx - x_val).argmin()
-                yS.append(cy[np.minimum(nearest_idx+1,cy.size-1)])
+                yS.append(cy[np.minimum(nearest_idx + 1, cy.size - 1)])
                 names.append(curve.name() or "Unnamed")
 
                 label += f"{names[-1]}:{yS[-1]:.2f} "
-                
-                
 
             self.point_label.setText(label)
             self.point_label.setPos(x_val, y_val)
-
 
         if hasattr(self.parent().parent().parent(), "plots"):
             for other in self.parent().parent().parent().plots:
@@ -223,7 +226,7 @@ class CursorPlot(pg.PlotWidget):
             self.temp_text.setText(f"Δt = {self.format_time(delta_t)}")
             self.temp_text.setPos(mid_x, bottom_y)
 
-    def mouseReleaseEvent(self, event):
+    def mouseReleaseEvent(self, event:QMouseEvent)->None:
         if self.zoom_mode and self.zoom_start_x is not None:
             # finalize zoom
             start, end = self.zoom_region_temp.getRegion()
@@ -231,15 +234,11 @@ class CursorPlot(pg.PlotWidget):
                 self.setXRange(min(start, end), max(start, end), padding=0)
 
                 if hasattr(self.parent().parent().parent(), "plots"):
-                    self.parent().parent().parent().windowWidth = max(start, end) - min(
-                        start, end
-                    )
-                    self.parent().parent().parent().tPos = (
-                        max(start, end) + min(start, end)
-                    ) / 2
-                    
+                    self.parent().parent().parent().windowWidth = max(start, end) - min(start, end)
+                    self.parent().parent().parent().tPos = (max(start, end) + min(start, end)) / 2
+
                     self.parent().parent().parent().updateView()
-                    
+
             # remove temporary region
             self.removeItem(self.zoom_region_temp)
             self.zoom_region_temp = None
@@ -248,22 +247,21 @@ class CursorPlot(pg.PlotWidget):
         else:
             super().mouseReleaseEvent(event)
 
-    def format_time(self, dt_seconds):
+    def format_time(self, dt_seconds:float)->str:
         """Return a human-readable time string for Δt."""
         if dt_seconds >= 1:
             return f"{dt_seconds:.3f} s"
-        elif dt_seconds >= 1e-3:
+        if dt_seconds >= 1e-3:
             return f"{dt_seconds * 1e3:.3f} ms"
-        elif dt_seconds >= 1e-6:
+        if dt_seconds >= 1e-6:
             return f"{dt_seconds * 1e6:.3f} µs"
-        else:
-            return f"{dt_seconds * 1e9:.3f} ns"
+        return f"{dt_seconds * 1e9:.3f} ns"
 
-    def leaveEvent(self, event):
+    def leaveEvent(self, event:QMouseEvent)->None:
         """Hide cursor and label when mouse leaves the widget."""
         self.cursor_line.hide()
-        self.timestamp_label.setText("")
-        self.point_label.setText("")
+        self.timestamp_label.hide()
+        self.point_label.hide()
 
         if self.dataLoaded:
             self.hideCursor()
@@ -274,8 +272,11 @@ class CursorPlot(pg.PlotWidget):
 
         super().leaveEvent(event)
 
-    def enterEvent(self, event):
+    def enterEvent(self, event:QMouseEvent)->None:
         """Hide cursor and label when mouse leaves the widget."""
+
+        self.timestamp_label.show()
+        self.point_label.show()
 
         if self.dataLoaded:
             self.showCursor()
@@ -285,9 +286,9 @@ class CursorPlot(pg.PlotWidget):
 
         super().leaveEvent(event)
 
-    def showCursor(self):
+    def showCursor(self)->None:
         self.dataLoaded = True
         self.cursor_line.show()
 
-    def hideCursor(self):
+    def hideCursor(self)->None:
         self.cursor_line.hide()
