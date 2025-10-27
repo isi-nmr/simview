@@ -237,9 +237,9 @@ class CursorPlot(pg.PlotWidget):
                     self.parent().parent().parent().tPos = (
                         max(start, end) + min(start, end)
                     ) / 2
-                    for other in self.parent().parent().parent().plots:
-                        other.setXRange(min(start, end), max(start, end), padding=0)
-
+                    
+                    self.parent().parent().parent().updateView()
+                    
             # remove temporary region
             self.removeItem(self.zoom_region_temp)
             self.zoom_region_temp = None

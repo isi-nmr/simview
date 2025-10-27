@@ -209,6 +209,9 @@ class GUIapp(QMainWindow):
         for plot in self.plots:
             plot.setXRange(rangeNeg, rangePos)
 
+        self.settings.setValue("tPos", self.tPos)
+        self.settings.setValue("windowWidth", self.windowWidth)
+        
     def resetApp(self):
         if self.plotContainers:
             for container in self.plotContainers:
@@ -258,9 +261,8 @@ class GUIapp(QMainWindow):
 
         self.registerCheckBoxes()
         
-        
-        self.tPos = self.tMax/2
-        self.windowWidth = self.tMax/2
+        self.tPos = float(self.settings.value("tPos",self.tMax/2))
+        self.windowWidth = float(self.settings.value("windowWidth",self.tMax/2))
         
 
         self.initPlots()
