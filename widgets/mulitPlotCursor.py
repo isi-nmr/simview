@@ -1,7 +1,7 @@
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QPointF, QTimer, Qt
-from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QResizeEvent
+from PyQt6.QtCore import QPointF, Qt, QTimer
+from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QResizeEvent, QShowEvent
 from PyQt6.QtWidgets import QApplication
 
 
@@ -74,7 +74,7 @@ class CursorPlot(pg.PlotWidget):
         self.timestamp_label.hide()
         self.point_label.hide()
 
-    def get_main_window(self):
+    def get_main_window(self) -> object | None:
         parent = self.parent()
         while parent is not None:
             if hasattr(parent, "plots") and hasattr(parent, "update_status"):
@@ -185,8 +185,8 @@ class CursorPlot(pg.PlotWidget):
         view_range = view_box.viewRange()
         x_min, x_max = view_range[0]
         y_min, y_max = view_range[1]
-        view_width = max(int(round(view_box.sceneBoundingRect().width())), 1)
-        view_height = max(int(round(view_box.sceneBoundingRect().height())), 1)
+        view_width = max(round(view_box.sceneBoundingRect().width()), 1)
+        view_height = max(round(view_box.sceneBoundingRect().height()), 1)
         refresh_key = (x_min, x_max, y_min, y_max, view_width, view_height)
         if self._last_refresh_key == refresh_key:
             return
@@ -473,7 +473,7 @@ class CursorPlot(pg.PlotWidget):
 
         super().enterEvent(event)
 
-    def showEvent(self, event) -> None:
+    def showEvent(self, event: QShowEvent) -> None:
         self._last_refresh_key = None
         self.schedule_curve_refresh()
         super().showEvent(event)

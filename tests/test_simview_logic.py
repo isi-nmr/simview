@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from simView import GUIapp, PROTON_GAMMA_MHZ_PER_T
+from simView import PROTON_GAMMA_MHZ_PER_T, GUIapp
 from utils.simUtilsBrkr import readBrkrChannels
 
 

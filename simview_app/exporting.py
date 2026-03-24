@@ -1,4 +1,5 @@
 import contextlib
+import importlib.util
 import io
 import os
 import tempfile
@@ -33,7 +34,7 @@ class ExportMixin:
         for axis_name in ("left", "right", "bottom", "top"):
             source_axis = source_item.getAxis(axis_name)
             export_item.showAxis(axis_name, show=source_axis.isVisible())
-            export_item.getAxis(axis_name).enableAutoSIPrefix(False)
+            export_item.getAxis(axis_name).enableAutoSIPrefix(enable=False)
 
         export_item.getAxis("left").setWidth(60)
         export_item.getAxis("right").setWidth(60)
@@ -52,14 +53,14 @@ class ExportMixin:
 
         curve_sources: list[tuple[np.ndarray, np.ndarray, pg.PlotDataItem]] = []
         if getattr(plot, "managed_curves", None):
-            for curve in plot.managed_curves:
-                curve_sources.append(
-                    (
-                        np.asarray(curve["x_data"]),
-                        np.asarray(curve["y_data"]),
-                        curve["item"],
-                    ),
+            curve_sources.extend(
+                (
+                    np.asarray(curve["x_data"]),
+                    np.asarray(curve["y_data"]),
+                    curve["item"],
                 )
+                for curve in plot.managed_curves
+            )
         else:
             for data_item in source_item.listDataItems():
                 x_data, y_data = data_item.getData()
@@ -124,8 +125,8 @@ class ExportMixin:
         if view_box:
             view_box_values = view_box.replace(",", " ").split()
             if len(view_box_values) == 4:
-                export_width = int(round(float(view_box_values[2])))
-                export_height = int(round(float(view_box_values[3])))
+                export_width = round(float(view_box_values[2]))
+                export_height = round(float(view_box_values[3]))
 
         root.set("width", str(export_width))
         root.set("height", str(export_height))
@@ -158,7 +159,10 @@ class ExportMixin:
                 QPageSize.Unit.Point,
             )
             pdf_writer.setPageSize(page_size)
-            pdf_writer.setPageMargins(QMarginsF(page_margin, page_margin, page_margin, page_margin), QPageLayout.Unit.Point)
+            pdf_writer.setPageMargins(
+                QMarginsF(page_margin, page_margin, page_margin, page_margin),
+                QPageLayout.Unit.Point,
+            )
 
             painter = QPainter(pdf_writer)
             try:
@@ -197,12 +201,11 @@ class ExportMixin:
             target_path = target_path.with_suffix(".svg")
             export_format = ".svg"
 
-        if export_format == ".svg":
-            try:
-                from pyqtgraph.exporters import SVGExporter
-            except ImportError:
-                dialog.showErrorMessage("SVG export is unavailable because PyQtGraph SVG exporters could not be loaded.")
-                return
+        if export_format == ".svg" and importlib.util.find_spec("pyqtgraph.exporters.SVGExporter") is None:
+            dialog.showErrorMessage(
+                "SVG export is unavailable because PyQtGraph SVG exporters could not be loaded.",
+            )
+            return
 
         export_dir = target_path.parent
         export_dir.mkdir(parents=True, exist_ok=True)

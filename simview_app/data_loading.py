@@ -12,6 +12,21 @@ from widgets.mulitPlotCursor import CursorPlot
 
 
 class DataLoadingMixin:
+    def is_zero_channel(self, channel: list[dict]) -> bool:
+        for line in channel:
+            values = np.asarray(line.get("data", []), dtype=float)
+            if values.size == 0:
+                continue
+
+            finite_values = values[np.isfinite(values)]
+            if finite_values.size == 0:
+                continue
+
+            if not np.allclose(finite_values, 0.0, atol=1e-15, rtol=0.0):
+                return False
+
+        return True
+
     def resetApp(self) -> None:
         if self.plotContainers:
             for container in self.plotContainers:
@@ -48,6 +63,7 @@ class DataLoadingMixin:
         self.update_gradient_channels()
         self.channels.extend(self.build_gradient_derived_channels())
         self.channels.extend(self.build_nco_power_derived_channels())
+        self.channels = [channel for channel in self.channels if not self.is_zero_channel(channel)]
 
         if not self.channels:
             self.sidePanel.hide()
@@ -87,7 +103,7 @@ class DataLoadingMixin:
         for channel in self.channels:
             checkBox = QtWidgets.QCheckBox()
             checkBox.setText(channel[0]["chanLabel"])
-            default_show = channel[0].get("show", True) and np.sum(np.abs(channel[0]["data"])) > 0
+            default_show = channel[0].get("show", True)
             if self.selectedChannels:
                 default_show = channel[0]["chanLabel"] in self.selectedChannels
             checkBox.setChecked(default_show)
@@ -125,17 +141,19 @@ class DataLoadingMixin:
             matches = filter_text in checkBox.text().lower()
             checkBox.setVisible(matches)
 
-    def setAllChannels(self, visible: bool) -> None:
+    def setAllChannels(self, *, visible: bool) -> None:
         changed = False
+        block_signals = True
+        unblock_signals = False
         self.sidePanel.setUpdatesEnabled(False)
         for checkBox in self.checkBoxes:
             if not checkBox.isVisible():
                 continue
             if checkBox.isChecked() == visible:
                 continue
-            checkBox.blockSignals(True)  # noqa: FBT003
+            checkBox.blockSignals(block_signals)
             checkBox.setChecked(visible)
-            checkBox.blockSignals(False)  # noqa: FBT003
+            checkBox.blockSignals(unblock_signals)
             self.update_channel_checkbox_state(checkBox)
             changed = True
         self.sidePanel.setUpdatesEnabled(True)
@@ -144,15 +162,17 @@ class DataLoadingMixin:
             self.update_status()
 
     def showAllChannels(self) -> None:
-        self.setAllChannels(True)
+        self.setAllChannels(visible=True)
 
     def hideAllChannels(self) -> None:
-        self.setAllChannels(False)
+        self.setAllChannels(visible=False)
 
     def initPlots(self) -> None:
         self.imageLayout.removeItem(self.navigation)
 
         pens, penDict = multiplot.makePens()
+        block_signals = True
+        unblock_signals = False
 
         for chanInd, channel in enumerate(self.channels):
             currentPlot = CursorPlot(darkMode=self.darkMode)
@@ -171,10 +191,10 @@ class DataLoadingMixin:
             plotItem.showAxis("right", show=True)
             axis = currentPlot.getPlotItem().getAxis("right")
             axis.setWidth(60)
-            axis.enableAutoSIPrefix(False)
+            axis.enableAutoSIPrefix(enable=False)
             axis = currentPlot.getPlotItem().getAxis("left")
             axis.setWidth(60)
-            axis.enableAutoSIPrefix(False)
+            axis.enableAutoSIPrefix(enable=False)
 
             self.checkBoxes[chanInd].contID = len(self.plotContainers) - 1
 
@@ -193,23 +213,17 @@ class DataLoadingMixin:
             axis_label, axis_units = self.get_channel_axis_label(channel)
             currentPlot.setLabel("right", axis_label, units=axis_units)
 
-            if np.sum(np.abs(channel[0]["data"])) == 0:
-                phaseContainer.hide()
-                self.checkBoxes[chanInd].blockSignals(True)  # noqa: FBT003
-                self.checkBoxes[chanInd].setChecked(False)
-                self.checkBoxes[chanInd].blockSignals(False)  # noqa: FBT003
-
             if self.selectedChannels != []:
                 if channel[0]["chanLabel"] in self.selectedChannels:
                     phaseContainer.show()
-                    self.checkBoxes[chanInd].blockSignals(True)  # noqa: FBT003
+                    self.checkBoxes[chanInd].blockSignals(block_signals)
                     self.checkBoxes[chanInd].setChecked(True)
-                    self.checkBoxes[chanInd].blockSignals(False)  # noqa: FBT003
+                    self.checkBoxes[chanInd].blockSignals(unblock_signals)
                 else:
                     phaseContainer.hide()
-                    self.checkBoxes[chanInd].blockSignals(True)  # noqa: FBT003
+                    self.checkBoxes[chanInd].blockSignals(block_signals)
                     self.checkBoxes[chanInd].setChecked(False)
-                    self.checkBoxes[chanInd].blockSignals(False)  # noqa: FBT003
+                    self.checkBoxes[chanInd].blockSignals(unblock_signals)
 
             for line in channel:
                 plot_data = line if line.get("drawStyle") == "line" else multiplot.convertToStep(line, "data")

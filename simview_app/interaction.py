@@ -3,7 +3,7 @@ import os
 import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtGui, QtWidgets
-from PyQt6.QtCore import QDir, Qt
+from PyQt6.QtCore import Qt
 
 from utils import dialog
 
@@ -49,27 +49,34 @@ class InteractionMixin:
 
         QtWidgets.QMessageBox.information(self, "SimView Shortcuts", help_text)
 
-    def toggleMeasureMode(self, checked: bool) -> None:
-        if checked:
-            self.zoomModeButton.blockSignals(True)  # noqa: FBT003
+    def toggleMeasureMode(self, checked: object) -> None:
+        is_checked = bool(checked)
+        block_signals = True
+        unblock_signals = False
+        if is_checked:
+            self.zoomModeButton.blockSignals(block_signals)
             self.zoomModeButton.setChecked(False)
-            self.zoomModeButton.blockSignals(False)  # noqa: FBT003
+            self.zoomModeButton.blockSignals(unblock_signals)
             self.setInteractionMode("measure")
         elif self.interactionMode == "measure":
             self.setInteractionMode("inspect")
 
-    def toggleZoomMode(self, checked: bool) -> None:
-        if checked:
-            self.measureButton.blockSignals(True)  # noqa: FBT003
+    def toggleZoomMode(self, checked: object) -> None:
+        is_checked = bool(checked)
+        block_signals = True
+        unblock_signals = False
+        if is_checked:
+            self.measureButton.blockSignals(block_signals)
             self.measureButton.setChecked(False)
-            self.measureButton.blockSignals(False)  # noqa: FBT003
+            self.measureButton.blockSignals(unblock_signals)
             self.setInteractionMode("zoom")
         elif self.interactionMode == "zoom":
             self.setInteractionMode("inspect")
 
-    def toggleMeasureSnapToEvents(self, checked: bool) -> None:
-        self.measureSnapToEvents = checked
-        self.settings.setValue("measureSnapToEvents", checked)
+    def toggleMeasureSnapToEvents(self, checked: object) -> None:
+        is_checked = bool(checked)
+        self.measureSnapToEvents = is_checked
+        self.settings.setValue("measureSnapToEvents", is_checked)
         self.update_status()
 
     def zero_trajectory_at_cursor(self) -> None:
@@ -202,10 +209,12 @@ class InteractionMixin:
         for plot in self.plots:
             plot.setXRange(rangeNeg, rangePos)
 
-        self.tSlider.blockSignals(True)  # noqa: FBT003
+        block_signals = True
+        unblock_signals = False
+        self.tSlider.blockSignals(block_signals)
         if self.sliderScaler > 0:
             self.tSlider.setValue(int(self.tPos / self.sliderScaler))
-        self.tSlider.blockSignals(False)  # noqa: FBT003
+        self.tSlider.blockSignals(unblock_signals)
         self.settings.setValue("tPos", self.tPos)
         self.settings.setValue("windowWidth", self.windowWidth)
         self.update_status()
@@ -242,5 +251,13 @@ class InteractionMixin:
         measurement_text = self.format_time(self.currentMeasurement)
         snap_text = "On" if self.measureSnapToEvents else "Off"
         self.statusBar().showMessage(
-            f"Mode: {mode_text} | Snap: {snap_text} | View width: {span_text} | Cursor: {cursor_text} | Measurement: {measurement_text}"
+            " | ".join(
+                (
+                    f"Mode: {mode_text}",
+                    f"Snap: {snap_text}",
+                    f"View width: {span_text}",
+                    f"Cursor: {cursor_text}",
+                    f"Measurement: {measurement_text}",
+                ),
+            ),
         )

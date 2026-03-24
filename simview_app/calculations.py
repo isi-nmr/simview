@@ -173,7 +173,12 @@ class CalculationMixin:
 
         return None
 
-    def sample_step_series(self, source_time: np.ndarray, source_data: np.ndarray, query_time: np.ndarray) -> np.ndarray:
+    def sample_step_series(
+        self,
+        source_time: np.ndarray,
+        source_data: np.ndarray,
+        query_time: np.ndarray,
+    ) -> np.ndarray:
         if query_time.size == 0:
             return np.zeros(0, dtype=float)
 

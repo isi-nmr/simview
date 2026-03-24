@@ -1,5 +1,6 @@
-from pathlib import Path
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pyqtgraph as pg
 from PyQt6 import QtGui, QtWidgets, uic
@@ -12,7 +13,9 @@ from simview_app.constants import PROTON_GAMMA_MHZ_PER_T
 from simview_app.data_loading import DataLoadingMixin
 from simview_app.exporting import ExportMixin
 from simview_app.interaction import InteractionMixin
-from widgets.mulitPlotCursor import CursorPlot
+
+if TYPE_CHECKING:
+    from widgets.mulitPlotCursor import CursorPlot
 
 
 class GUIapp(
@@ -151,15 +154,22 @@ class GUIapp(
         helpMenu.addAction(shortcutsHelpAction)
 
         self.settings = QSettings("MR_ISIBrno", "BrukerSimView")
-        self.measureSnapToEvents = bool(self.settings.value("measureSnapToEvents", False, type=bool))
+        default_false = False
+        self.measureSnapToEvents = bool(self.settings.value("measureSnapToEvents", default_false, type=bool))
         self.snapMeasureAction.setChecked(self.measureSnapToEvents)
         self.gradientCalibrationHzPerMm = float(self.settings.value("gradientCalibrationHzPerMm", 0.0, type=float))
         self.nucleusGammaMHzPerT = float(self.settings.value("nucleusGammaMHzPerT", PROTON_GAMMA_MHZ_PER_T, type=float))
-        self.displayGradientsInMtPerM = bool(self.settings.value("displayGradientsInMtPerM", False, type=bool))
-        self.useOpenGLAcceleration = bool(self.settings.value("useOpenGLAcceleration", False, type=bool))
+        self.displayGradientsInMtPerM = bool(
+            self.settings.value("displayGradientsInMtPerM", default_false, type=bool),
+        )
+        self.useOpenGLAcceleration = bool(
+            self.settings.value("useOpenGLAcceleration", default_false, type=bool),
+        )
         self.derivedSignalStartupPadding = float(self.settings.value("derivedSignalStartupPadding", 1.0, type=float))
         stored_trajectory_zero = self.settings.value("trajectoryZeroReferenceTime", None)
-        self.trajectoryZeroReferenceTime = float(stored_trajectory_zero) if stored_trajectory_zero not in {None, ""} else None
+        self.trajectoryZeroReferenceTime = (
+            float(stored_trajectory_zero) if stored_trajectory_zero not in {None, ""} else None
+        )
 
         self.selectedChannels = self.settings.value("selectedChannels", [])
         if not isinstance(self.selectedChannels, list):
