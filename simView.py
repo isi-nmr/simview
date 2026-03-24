@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -50,6 +51,7 @@ class GUIapp(QMainWindow):
         self.trajectoryZeroReferenceTime: float | None = None
         self.derivedSignalStartupPadding = 1.0
         self.inlineData = data
+        self.performanceDebug = True
 
         path = Path(__file__).resolve().parent / "visusimForm.ui"
         uic.loadUi(path, self)
@@ -953,6 +955,48 @@ class GUIapp(QMainWindow):
 
         return np.flatnonzero(keep_mask)
 
+    def prebin_curve_to_viewport(
+        self,
+        x_data: np.ndarray,
+        y_data: np.ndarray,
+        viewport_width: int,
+        x_min: float,
+        x_max: float,
+        *,
+        bins_per_pixel: int = 2,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if x_data.size <= 2:
+            return x_data, y_data
+
+        bin_count = max(int(viewport_width * bins_per_pixel), 1)
+        if x_data.size <= bin_count * 4:
+            return x_data, y_data
+
+        x_span = max(abs(x_max - x_min), 1e-12)
+        normalized = (x_data - x_min) / x_span
+        bin_indices = np.clip((normalized * bin_count).astype(int), 0, bin_count - 1)
+
+        kept_indices: list[int] = [0]
+        start = 0
+        while start < x_data.size:
+            current_bin = int(bin_indices[start])
+            end = start + 1
+            while end < x_data.size and int(bin_indices[end]) == current_bin:
+                end += 1
+
+            segment = slice(start, end)
+            segment_y = y_data[segment]
+            if segment_y.size > 0:
+                local_min = start + int(np.argmin(segment_y))
+                local_max = start + int(np.argmax(segment_y))
+                kept_indices.extend((local_min, local_max, end - 1))
+
+            start = end
+
+        kept_indices.append(x_data.size - 1)
+        unique_indices = np.unique(np.asarray(kept_indices, dtype=int))
+        return x_data[unique_indices], y_data[unique_indices]
+
     def downsample_curve_to_viewport(
         self,
         x_data: np.ndarray,
@@ -981,6 +1025,18 @@ class GUIapp(QMainWindow):
 
         if x_data.size <= max_points:
             return x_data, y_data
+
+        prebin_target = max(max_points * 4, viewport_width * 8)
+        if x_data.size > prebin_target:
+            x_data, y_data = self.prebin_curve_to_viewport(
+                x_data,
+                y_data,
+                viewport_width,
+                x_min,
+                x_max,
+            )
+            if x_data.size <= max_points:
+                return x_data, y_data
 
         low_tolerance = 0.0
         high_tolerance = 0.5
@@ -1242,8 +1298,14 @@ class GUIapp(QMainWindow):
         self.updateView()
 
     def zoomOut(self) -> None:
+        zoom_start = time.perf_counter()
+        if self.performanceDebug:
+            print(f"[perf {zoom_start:.6f}] zoomOut start width={self.windowWidth:.6g}")
         self.windowWidth = min(self.tMax - self.tMin, self.windowWidth / 0.8)
         self.updateView()
+        if self.performanceDebug:
+            zoom_end = time.perf_counter()
+            print(f"[perf {zoom_end:.6f}] zoomOut end elapsed={(zoom_end - zoom_start) * 1e3:.1f} ms")
 
     def changeXRange(self) -> None:
         self.tPos = self.tSlider.value() * self.sliderScaler
@@ -1260,6 +1322,7 @@ class GUIapp(QMainWindow):
         self.updateView()
 
     def updateView(self) -> None:
+        update_start = time.perf_counter()
         self.windowWidth = min(max(self.windowWidth, self.sliderScaler), self.tMax - self.tMin)
         half_width = self.windowWidth * 0.5
         self.tPos = min(max(self.tPos, self.tMin + half_width), self.tMax - half_width)
@@ -1276,6 +1339,12 @@ class GUIapp(QMainWindow):
         self.settings.setValue("tPos", self.tPos)
         self.settings.setValue("windowWidth", self.windowWidth)
         self.update_status()
+        if self.performanceDebug:
+            update_end = time.perf_counter()
+            print(
+                f"[perf {update_end:.6f}] updateView elapsed={(update_end - update_start) * 1e3:.1f} ms "
+                f"plots={len(self.plots)} range=({rangeNeg:.6g}, {rangePos:.6g})"
+            )
 
     def resetView(self) -> None:
         self.windowWidth = self.tMax - self.tMin

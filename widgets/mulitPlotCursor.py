@@ -1,5 +1,6 @@
 import numpy as np
 import pyqtgraph as pg
+import time
 from PyQt6.QtCore import QPointF, QTimer, Qt
 from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QResizeEvent
 from PyQt6.QtWidgets import QApplication
@@ -30,6 +31,7 @@ class CursorPlot(pg.PlotWidget):
         self.last_cursor_x: float | None = None
         self._last_refresh_key: tuple[float, float, float, float, int, int] | None = None
         self._resize_in_progress = False
+        self._refresh_in_progress = False
         super().__init__(*args, **kwargs)
 
         # Create the vertical line cursor
@@ -121,6 +123,8 @@ class CursorPlot(pg.PlotWidget):
                 "item": plot_curve,
                 "x_data": x_array,
                 "y_data": y_array,
+                "cached_render_key": None,
+                "cached_render_data": None,
             },
         )
         self.schedule_curve_refresh()
@@ -132,6 +136,8 @@ class CursorPlot(pg.PlotWidget):
 
         self.managed_curves[index]["x_data"] = x_data
         self.managed_curves[index]["y_data"] = y_data
+        self.managed_curves[index]["cached_render_key"] = None
+        self.managed_curves[index]["cached_render_data"] = None
 
         if index < len(self.curve_cache):
             curve_name, _, _ = self.curve_cache[index]
@@ -146,6 +152,14 @@ class CursorPlot(pg.PlotWidget):
         if not self.isVisible():
             self._last_refresh_key = None
             return
+        if self._refresh_in_progress:
+            return
+        main_window = self.get_main_window()
+        if main_window is not None and getattr(main_window, "performanceDebug", False):
+            print(
+                f"[perf {time.perf_counter():.6f}] schedule_curve_refresh "
+                f"plot={id(self)} visible={self.isVisible()} resize={self._resize_in_progress}"
+            )
         if self._resize_in_progress:
             self._refresh_timer.start(120)
             return
@@ -160,6 +174,9 @@ class CursorPlot(pg.PlotWidget):
         self._refresh_timer.start(max(delay_ms, 0))
 
     def _handle_refresh_timeout(self) -> None:
+        main_window = self.get_main_window()
+        if main_window is not None and getattr(main_window, "performanceDebug", False):
+            print(f"[perf {time.perf_counter():.6f}] refresh_timer_fired plot={id(self)}")
         self._resize_in_progress = False
         self.refresh_visible_curves()
 
@@ -173,6 +190,7 @@ class CursorPlot(pg.PlotWidget):
         main_window = self.get_main_window()
         if main_window is None:
             return
+        refresh_start = time.perf_counter()
 
         view_box = self.getViewBox()
         view_range = view_box.viewRange()
@@ -184,25 +202,50 @@ class CursorPlot(pg.PlotWidget):
         if self._last_refresh_key == refresh_key:
             return
 
-        for curve in self.managed_curves:
-            full_x = np.asarray(curve["x_data"])
-            full_y = np.asarray(curve["y_data"])
-            sliced_x, sliced_y = main_window.slice_curve_to_range(full_x, full_y, x_min, x_max)
-            simplified_x, simplified_y = main_window.downsample_curve_to_viewport(
-                sliced_x,
-                sliced_y,
-                view_width,
-                view_height,
-                x_min,
-                x_max,
-                y_min,
-                y_max,
-                max_point_factor=4.0,
-                min_points=1200,
-            )
-            curve["item"].setData(simplified_x, simplified_y)
+        self._refresh_in_progress = True
+        try:
+            for curve in self.managed_curves:
+                full_x = np.asarray(curve["x_data"])
+                full_y = np.asarray(curve["y_data"])
+                curve_render_key = (
+                    refresh_key,
+                    full_x.size,
+                    full_y.size,
+                    float(full_x[0]) if full_x.size else 0.0,
+                    float(full_x[-1]) if full_x.size else 0.0,
+                )
+                cached_render_key = curve.get("cached_render_key")
+                cached_render_data = curve.get("cached_render_data")
+                if cached_render_key == curve_render_key and cached_render_data is not None:
+                    simplified_x, simplified_y = cached_render_data
+                else:
+                    sliced_x, sliced_y = main_window.slice_curve_to_range(full_x, full_y, x_min, x_max)
+                    simplified_x, simplified_y = main_window.downsample_curve_to_viewport(
+                        sliced_x,
+                        sliced_y,
+                        view_width,
+                        view_height,
+                        x_min,
+                        x_max,
+                        y_min,
+                        y_max,
+                        max_point_factor=4.0,
+                        min_points=1200,
+                    )
+                    curve["cached_render_key"] = curve_render_key
+                    curve["cached_render_data"] = (simplified_x, simplified_y)
+                curve["item"].setData(simplified_x, simplified_y)
 
-        self._last_refresh_key = refresh_key
+            self._last_refresh_key = refresh_key
+        finally:
+            self._refresh_in_progress = False
+        if getattr(main_window, "performanceDebug", False):
+            refresh_end = time.perf_counter()
+            print(
+                f"[perf {refresh_end:.6f}] refresh_visible_curves "
+                f"plot={id(self)} curves={len(self.managed_curves)} "
+                f"elapsed={(refresh_end - refresh_start) * 1e3:.1f} ms width={view_width}"
+            )
 
     def notify_measurement(self, dt_seconds: float | None = None) -> None:
         main_window = self.get_main_window()
