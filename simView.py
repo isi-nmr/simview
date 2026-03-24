@@ -438,9 +438,14 @@ class GUIapp(QMainWindow):
     def rebuild_loaded_channels(self) -> None:
         if not self.channels:
             return
-        self.channels = [channel for channel in self.channels if channel[0].get("type") != "grads_derived"]
+        self.channels = [
+            channel
+            for channel in self.channels
+            if channel[0].get("type") not in {"grads_derived", "nco_derived"}
+        ]
         self.update_gradient_channels()
         self.channels.extend(self.build_gradient_derived_channels())
+        self.channels.extend(self.build_nco_power_derived_channels())
 
     def reload_current_data(self) -> None:
         if self.dataPath is not None:
@@ -529,6 +534,137 @@ class GUIapp(QMainWindow):
             ),
         )
         return np.asarray(trajectory, dtype=float) - reference_value
+
+    def get_nco_channel_role(self, line: dict) -> tuple[str, str] | None:
+        if line.get("type") != "NCO":
+            return None
+
+        nco_id = str(line.get("ind", "")).strip()
+        key = str(line.get("key", "")).strip().lower()
+        if key in {"am", "pw"} and nco_id:
+            return nco_id, key
+
+        for candidate in (str(line.get("label", "")), str(line.get("chanLabel", ""))):
+            match = re.search(r"NCO_(\d+)_(am|pw)\b", candidate, flags=re.IGNORECASE)
+            if match:
+                return match.group(1), match.group(2).lower()
+
+        return None
+
+    def sample_step_series(self, source_time: np.ndarray, source_data: np.ndarray, query_time: np.ndarray) -> np.ndarray:
+        if query_time.size == 0:
+            return np.zeros(0, dtype=float)
+
+        norm_time, norm_data = self.normalize_time_series(source_time, source_data)
+        if norm_time.size == 0:
+            return np.zeros_like(query_time, dtype=float)
+
+        indices = np.searchsorted(norm_time, query_time, side="right") - 1
+        indices = np.clip(indices, 0, norm_time.size - 1)
+        sampled = norm_data[indices].astype(float, copy=True)
+        sampled[query_time < norm_time[0]] = float(norm_data[0])
+        return sampled
+
+    def build_nco_power_derived_channels(self) -> list[list[dict]]:
+        nco_sources: dict[str, dict[str, dict]] = {}
+        for channel in self.channels:
+            for line in channel:
+                role = self.get_nco_channel_role(line)
+                if role is None:
+                    continue
+                nco_id, key = role
+                nco_sources.setdefault(nco_id, {})[key] = line
+
+        derived_channels: list[list[dict]] = []
+        for nco_id in sorted(nco_sources):
+            sources = nco_sources[nco_id]
+            if "am" not in sources or "pw" not in sources:
+                continue
+
+            am_line = sources["am"]
+            pw_line = sources["pw"]
+            am_time, am_data = self.normalize_time_series(
+                np.asarray(am_line["t"], dtype=float),
+                np.asarray(am_line["data"], dtype=float),
+            )
+            pw_time, pw_data = self.normalize_time_series(
+                np.asarray(pw_line["t"], dtype=float),
+                np.asarray(pw_line["data"], dtype=float),
+            )
+            merged_time = np.unique(np.concatenate((am_time, pw_time)))
+            if merged_time.size == 0:
+                continue
+
+            sampled_am = self.sample_step_series(am_time, am_data, merged_time)
+            sampled_pw = self.sample_step_series(pw_time, pw_data, merged_time)
+
+            # Assume amplitude is a percentage of RF amplitude, so actual power scales with amplitude^2.
+            output_power = sampled_pw * np.square(sampled_am / 100.0)
+            energy = np.zeros_like(output_power, dtype=float)
+            if merged_time.size > 1:
+                energy[1:] = np.cumsum(output_power[:-1] * np.diff(merged_time))
+
+            average_power = np.zeros_like(output_power, dtype=float)
+            elapsed = merged_time - merged_time[0]
+            valid = elapsed > 0
+            average_power[valid] = energy[valid] / elapsed[valid]
+
+            derived_channels.append(
+                [
+                    {
+                        "chanLabel": f"NCO_{nco_id} Output Power",
+                        "label": f"NCO_{nco_id}_pout",
+                        "type": "nco_derived",
+                        "ind": nco_id,
+                        "key": "pout",
+                        "plotType": "power",
+                        "units": "W",
+                        "t": merged_time,
+                        "data": output_power,
+                        "annotations": [],
+                        "drawStyle": "step",
+                        "show": False,
+                    },
+                ],
+            )
+            derived_channels.append(
+                [
+                    {
+                        "chanLabel": f"NCO_{nco_id} Energy",
+                        "label": f"NCO_{nco_id}_energy",
+                        "type": "nco_derived",
+                        "ind": nco_id,
+                        "key": "energy",
+                        "plotType": "mag",
+                        "units": "J",
+                        "t": merged_time,
+                        "data": energy,
+                        "annotations": [],
+                        "drawStyle": "line",
+                        "show": False,
+                    },
+                ],
+            )
+            derived_channels.append(
+                [
+                    {
+                        "chanLabel": f"NCO_{nco_id} Average Power",
+                        "label": f"NCO_{nco_id}_pavg",
+                        "type": "nco_derived",
+                        "ind": nco_id,
+                        "key": "pavg",
+                        "plotType": "power",
+                        "units": "W",
+                        "t": merged_time,
+                        "data": average_power,
+                        "annotations": [],
+                        "drawStyle": "line",
+                        "show": False,
+                    },
+                ],
+            )
+
+        return derived_channels
 
     def apply_trajectory_zero_in_place(self) -> None:
         if not self.channels:
@@ -1123,6 +1259,7 @@ class GUIapp(QMainWindow):
 
         self.update_gradient_channels()
         self.channels.extend(self.build_gradient_derived_channels())
+        self.channels.extend(self.build_nco_power_derived_channels())
 
         if not self.channels:
             self.sidePanel.hide()
