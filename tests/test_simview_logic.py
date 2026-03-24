@@ -401,17 +401,19 @@ def test_read_bruker_channels_attaches_pulse_program_event_annotations(bruker_fi
     channels = readBrkrChannels(str(bruker_fixture_path), DummyProgress(), DummyMainWindow())
 
     assert channels is not None
-    first_channel = channels[0][0]
-    assert len(first_channel["annotations"]) > 0
-    event_annotation = next((ann for ann in first_channel["annotations"] if ann.get("name") == "ppg_events"), None)
+    events_channel = next(channel[0] for channel in channels if channel[0]["chanLabel"] == "NCO_0_events")
+    event_annotation = next((ann for ann in events_channel["annotations"] if ann.get("name") == "ppg_events"), None)
     assert event_annotation is not None
     assert len(event_annotation["t"]) > 0
     assert len(event_annotation["texts"]) > 0
     assert any("wr=" in text for text in event_annotation["texts"])
 
+    regular_nco_channel = next(channel[0] for channel in channels if channel[0]["chanLabel"] == "NCO_1_am")
+    assert all(ann.get("name") != "ppg_events" for ann in regular_nco_channel["annotations"])
+
     gradient_channel = channels[-1]
     assert len(gradient_channel) == 3
-    assert any(ann.get("name") == "ppg_events" for ann in gradient_channel[0]["annotations"])
+    assert not any(ann.get("name") == "ppg_events" for ann in gradient_channel[0]["annotations"])
     assert gradient_channel[1]["annotations"] == []
     assert gradient_channel[2]["annotations"] == []
 

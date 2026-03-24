@@ -41,6 +41,8 @@ class DataLoadingMixin:
 
     def is_zero_channel(self, channel: list[dict]) -> bool:
         for line in channel:
+            if line.get("annotations"):
+                return False
             values = np.asarray(line.get("data", []), dtype=float)
             if values.size == 0:
                 continue

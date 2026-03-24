@@ -173,19 +173,16 @@ class CursorPlot(pg.PlotWidget):
         y_min, y_max = y_range
         y_span = max(y_max - y_min, 1e-12)
         base_y = y_max - 0.06 * y_span
-        row_spacing = 0.08 * y_span
-        visible_row = 0
 
         for annotation in self.annotation_items:
             time_value = float(annotation["time"])
             text_item = annotation["text"]
             if x_min <= time_value <= x_max:
                 text_item.show()
-                text_y = base_y - visible_row * row_spacing
+                text_y = base_y
                 if text_y <= y_min:
                     text_y = y_min + 0.02 * y_span
                 text_item.setPos(time_value, text_y)
-                visible_row += 1
             else:
                 text_item.hide()
 

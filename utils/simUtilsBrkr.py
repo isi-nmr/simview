@@ -342,9 +342,8 @@ def readBrkrChannels(path: str, progress: QProgressDialog, app: QMainWindow)->di
                 "plotType": plotType,
                 "t": ncos[nco]["t"],
                 "data": ncos[nco][key],
+                "annotations": [],
             }
-
-            channelDes["annotations"] = list(event_annotations)
 
             if key == "am":
                 sf = ncos[nco]["sf"]
@@ -370,6 +369,25 @@ def readBrkrChannels(path: str, progress: QProgressDialog, app: QMainWindow)->di
 
             channels.append([channelDes])
 
+    if event_annotations:
+        event_times = np.asarray(event_annotations[0].get("t", np.asarray([], dtype=float)), dtype=float)
+        channels.append(
+            [
+                {
+                    "chanLabel": "NCO_0_events",
+                    "label": "NCO_0_events",
+                    "type": "NCO",
+                    "ind": "0",
+                    "key": "events",
+                    "plotType": "mag",
+                    "units": "",
+                    "t": event_times,
+                    "data": np.zeros(event_times.shape, dtype=float),
+                    "annotations": list(event_annotations),
+                },
+            ]
+        )
+
     channels.append(
         [
             {
@@ -384,7 +402,7 @@ def readBrkrChannels(path: str, progress: QProgressDialog, app: QMainWindow)->di
                 "raw_data": grads[0].copy(),
                 "units": "%",
                 "raw_units": "%",
-                "annotations": list(event_annotations),
+                "annotations": [],
                 "pen": "g",
             },
             {
