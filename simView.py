@@ -2,10 +2,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import pyqtgraph as pg
 from PyQt6 import QtGui, QtWidgets, uic
 from PyQt6.QtCore import QDir, QSettings, Qt
-from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import QApplication, QMainWindow, QSizePolicy, QVBoxLayout
 
 from simview_app.calculations import CalculationMixin
@@ -47,7 +45,7 @@ class GUIapp(
         self.gradientCalibrationHzPerMm = 0.0
         self.nucleusGammaMHzPerT = PROTON_GAMMA_MHZ_PER_T
         self.displayGradientsInMtPerM = False
-        self.useOpenGLAcceleration = False
+        self.themeMode = "system"
         self.trajectoryZeroReferenceTime: float | None = None
         self.derivedSignalStartupPadding = 1.0
         self.inlineData = data
@@ -162,9 +160,7 @@ class GUIapp(
         self.displayGradientsInMtPerM = bool(
             self.settings.value("displayGradientsInMtPerM", default_false, type=bool),
         )
-        self.useOpenGLAcceleration = bool(
-            self.settings.value("useOpenGLAcceleration", default_false, type=bool),
-        )
+        self.themeMode = str(self.settings.value("themeMode", "system")).lower()
         self.derivedSignalStartupPadding = float(self.settings.value("derivedSignalStartupPadding", 1.0, type=float))
         stored_trajectory_zero = self.settings.value("trajectoryZeroReferenceTime", None)
         self.trajectoryZeroReferenceTime = (
@@ -223,6 +219,13 @@ class GUIapp(
         self.gradientCalibrationSpinBox.setSingleStep(1.0)
         self.gradientCalibrationSpinBox.setSuffix(" Hz/mm @ 100%")
         self.gradientCalibrationSpinBox.setValue(self.gradientCalibrationHzPerMm)
+        self.themeModeComboBox = QtWidgets.QComboBox()
+        self.themeModeComboBox.addItem("System", "system")
+        self.themeModeComboBox.addItem("Light", "light")
+        self.themeModeComboBox.addItem("Dark", "dark")
+        theme_index = max(self.themeModeComboBox.findData(self.themeMode), 0)
+        self.themeModeComboBox.setCurrentIndex(theme_index)
+        self.themeModeComboBox.currentIndexChanged.connect(self.on_theme_mode_changed)
         self.nucleusGammaSpinBox = QtWidgets.QDoubleSpinBox()
         self.nucleusGammaSpinBox.setDecimals(6)
         self.nucleusGammaSpinBox.setRange(0.001, 1_000.0)
@@ -239,11 +242,10 @@ class GUIapp(
         self.derivedSignalStartupPaddingSpinBox.setValue(self.derivedSignalStartupPadding)
         self.displayGradientsInMtPerMCheckBox = QtWidgets.QCheckBox("Display physical gradients in mT/m")
         self.displayGradientsInMtPerMCheckBox.setChecked(self.displayGradientsInMtPerM)
-        self.useOpenGLAccelerationCheckBox = QtWidgets.QCheckBox("Use OpenGL acceleration (experimental)")
-        self.useOpenGLAccelerationCheckBox.setChecked(self.useOpenGLAcceleration)
         self.applyScannerSettingsButton = QtWidgets.QPushButton("Apply Scanner Settings")
         self.applyScannerSettingsButton.clicked.connect(self.apply_scanner_settings)
         self.settingsFormLayout = QtWidgets.QFormLayout()
+        self.settingsFormLayout.addRow("Theme", self.themeModeComboBox)
         self.settingsFormLayout.addRow("Grad Calibration", self.gradientCalibrationSpinBox)
         self.settingsFormLayout.addRow("Nucleus Gamma", self.nucleusGammaSpinBox)
         self.settingsFormLayout.addRow("Max Grad @ 100%", self.maxGradientStrengthValue)
@@ -251,7 +253,6 @@ class GUIapp(
         self.settingsLayout.addWidget(self.scannerSettingsHint)
         self.settingsLayout.addLayout(self.settingsFormLayout)
         self.settingsLayout.addWidget(self.displayGradientsInMtPerMCheckBox)
-        self.settingsLayout.addWidget(self.useOpenGLAccelerationCheckBox)
         self.settingsLayout.addWidget(self.applyScannerSettingsButton)
         self.settingsLayout.addStretch(1)
         self.gradientCalibrationSpinBox.valueChanged.connect(self.update_scanner_settings_display)
@@ -269,17 +270,9 @@ class GUIapp(
 
         qt_app = QApplication.instance()
         assert qt_app is not None
-        palette = qt_app.palette()
-        base_color = palette.color(QPalette.ColorRole.Base)
-        self.darkMode = base_color.value() < 128
-
-        if self.darkMode:
-            pg.setConfigOption("background", "black")
-            pg.setConfigOption("foreground", "white")
-        else:
-            pg.setConfigOption("background", "white")
-            pg.setConfigOption("foreground", "black")
-        pg.setConfigOption("useOpenGL", self.useOpenGLAcceleration)
+        self.systemPalette = qt_app.palette()
+        self.standardPalette = qt_app.style().standardPalette()
+        self.apply_theme_settings()
 
         if self.dataPath is None:
             self.dataPath = self.settings.value("lastFolder", QDir.homePath())

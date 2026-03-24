@@ -104,6 +104,36 @@ class CursorPlot(pg.PlotWidget):
     def register_curve(self, name: str, x_data: np.ndarray, y_data: np.ndarray) -> None:
         self.curve_cache.append((name, x_data, y_data))
 
+    def apply_theme(self, *, dark_mode: bool) -> None:
+        self.setBackground("black" if dark_mode else "white")
+        overlay_bg = QColor(0, 0, 0, 150) if dark_mode else QColor(255, 255, 255, 220)
+        cursor_bg = QColor(0, 0, 0, 150) if dark_mode else QColor(0, 0, 0, 10)
+        axis_color = "white" if dark_mode else "black"
+        axis_pen = pg.mkPen(axis_color)
+
+        self.timestamp_label.bg_color = cursor_bg
+        self.point_label.bg_color = cursor_bg
+
+        plot_item = self.getPlotItem()
+        for axis_name in ("left", "right", "bottom", "top"):
+            axis = plot_item.getAxis(axis_name)
+            axis.setPen(axis_pen)
+            axis.setTextPen(axis_pen)
+            axis.setTickPen(axis_pen)
+            if axis.labelText:
+                axis.setLabel(axis.labelText, units=axis.labelUnits, color=axis_color)
+        if plot_item.legend is not None:
+            plot_item.legend.setLabelTextColor(axis_color)
+            for _sample, label in plot_item.legend.items:
+                label.setAttr("color", axis_color)
+                label.setText(label.text, color=axis_color)
+
+        for annotation in self.annotation_items:
+            text_item = annotation["text"]
+            line_item = annotation["line"]
+            text_item.bg_color = overlay_bg
+            line_item.setPen(pg.mkPen("r", style=Qt.PenStyle.DashLine))
+
     def add_annotation_marker(self, time_value: float, text_value: str, *, color: str = "r") -> None:
         annotation_line = pg.InfiniteLine(
             pos=time_value,

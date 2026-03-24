@@ -4,6 +4,8 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtGui, QtWidgets
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtWidgets import QApplication
 
 from utils import dialog
 
@@ -11,6 +13,61 @@ from .constants import _UNSET
 
 
 class InteractionMixin:
+    def make_dark_palette(self) -> QPalette:
+        palette = QPalette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+        palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+        palette.setColor(QPalette.ColorRole.Base, QColor(35, 35, 35))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+        palette.setColor(QPalette.ColorRole.ToolTipBase, Qt.GlobalColor.white)
+        palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
+        palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
+        palette.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+        palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
+        palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
+        palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+        palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
+        return palette
+
+    def get_theme_palette(self, theme_mode: str) -> tuple[QPalette, bool]:
+        if theme_mode == "dark":
+            return self.make_dark_palette(), True
+        if theme_mode == "light":
+            return QPalette(self.standardPalette), False
+
+        palette = QPalette(self.systemPalette)
+        base_color = palette.color(QPalette.ColorRole.Base)
+        return palette, base_color.value() < 128
+
+    def apply_theme_settings(self) -> None:
+        qt_app = QApplication.instance()
+        if qt_app is None:
+            return
+
+        palette, dark_mode = self.get_theme_palette(self.themeMode)
+        qt_app.setPalette(palette)
+        self.setPalette(palette)
+        self.darkMode = dark_mode
+
+        if self.darkMode:
+            pg.setConfigOption("background", "black")
+            pg.setConfigOption("foreground", "white")
+        else:
+            pg.setConfigOption("background", "white")
+            pg.setConfigOption("foreground", "black")
+
+    def update_existing_plot_themes(self) -> None:
+        for plot in getattr(self, "plots", []):
+            plot.apply_theme(dark_mode=self.darkMode)
+
+    def on_theme_mode_changed(self) -> None:
+        self.themeMode = str(self.themeModeComboBox.currentData())
+        self.settings.setValue("themeMode", self.themeMode)
+        self.apply_theme_settings()
+        self.update_existing_plot_themes()
+        self.update()
+
     def activate_measure(self) -> None:
         self.setInteractionMode("measure")
 
@@ -163,17 +220,18 @@ class InteractionMixin:
             self.loadData(self.inlineData)
 
     def apply_scanner_settings(self) -> None:
+        self.themeMode = self.themeModeComboBox.currentData()
         self.gradientCalibrationHzPerMm = float(self.gradientCalibrationSpinBox.value())
         self.nucleusGammaMHzPerT = float(self.nucleusGammaSpinBox.value())
         self.displayGradientsInMtPerM = self.displayGradientsInMtPerMCheckBox.isChecked()
-        self.useOpenGLAcceleration = self.useOpenGLAccelerationCheckBox.isChecked()
         self.derivedSignalStartupPadding = float(self.derivedSignalStartupPaddingSpinBox.value())
+        self.settings.setValue("themeMode", self.themeMode)
         self.settings.setValue("gradientCalibrationHzPerMm", self.gradientCalibrationHzPerMm)
         self.settings.setValue("nucleusGammaMHzPerT", self.nucleusGammaMHzPerT)
         self.settings.setValue("displayGradientsInMtPerM", self.displayGradientsInMtPerM)
-        self.settings.setValue("useOpenGLAcceleration", self.useOpenGLAcceleration)
         self.settings.setValue("derivedSignalStartupPadding", self.derivedSignalStartupPadding)
-        pg.setConfigOption("useOpenGL", self.useOpenGLAcceleration)
+        self.apply_theme_settings()
+        self.update_existing_plot_themes()
         self.update_scanner_settings_display()
         if self.channels:
             self.selectedChannels = [check_box.text() for check_box in self.checkBoxes if check_box.isChecked()]
