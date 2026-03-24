@@ -1,7 +1,7 @@
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QPointF, Qt
-from PyQt6.QtGui import QColor, QMouseEvent, QPainter
+from PyQt6.QtCore import QPointF, QTimer, Qt
+from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QResizeEvent
 from PyQt6.QtWidgets import QApplication
 
 
@@ -24,6 +24,11 @@ class CursorPlot(pg.PlotWidget):
     """A PlotWidget with its own vertical cursor line."""
 
     def __init__(self, *args:tuple, darkMode:bool=False, **kwargs:dict)->None:
+        self.dataLoaded = False
+        self.curve_cache: list[tuple[str, np.ndarray, np.ndarray]] = []
+        self.managed_curves: list[dict[str, object]] = []
+        self.last_cursor_x: float | None = None
+        self._last_refresh_key: tuple[float, float, float, float, int, int] | None = None
         super().__init__(*args, **kwargs)
 
         # Create the vertical line cursor
@@ -46,9 +51,11 @@ class CursorPlot(pg.PlotWidget):
         self.mouse_proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=90, slot=self.on_mouse_moved)
         self.scene().installEventFilter(self)  # for enter/leave detection
 
-        self.dataLoaded = False
-        self.curve_cache: list[tuple[str, np.ndarray, np.ndarray]] = []
-        self.last_cursor_x: float | None = None
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.timeout.connect(self.refresh_visible_curves)
+        self.getViewBox().sigXRangeChanged.connect(self.schedule_curve_refresh)
+        self.getViewBox().sigYRangeChanged.connect(self.schedule_curve_refresh)
 
         self.temp_region = None
         self.temp_text = None
@@ -91,6 +98,66 @@ class CursorPlot(pg.PlotWidget):
 
     def register_curve(self, name: str, x_data: np.ndarray, y_data: np.ndarray) -> None:
         self.curve_cache.append((name, x_data, y_data))
+
+    def add_managed_curve(self, x_data: np.ndarray, y_data: np.ndarray, **plot_kwargs: object) -> pg.PlotDataItem:
+        plot_curve = self.plot(x_data, y_data, **plot_kwargs)
+        plot_curve.setClipToView(True)
+        plot_curve.setSkipFiniteCheck(True)
+
+        curve_name = str(plot_kwargs.get("name", ""))
+        self.register_curve(curve_name, x_data, y_data)
+        self.managed_curves.append(
+            {
+                "item": plot_curve,
+                "x_data": x_data,
+                "y_data": y_data,
+            },
+        )
+        self.schedule_curve_refresh()
+        return plot_curve
+
+    def schedule_curve_refresh(self, *args: object) -> None:
+        if not self.managed_curves:
+            return
+        self._refresh_timer.start(0)
+
+    def refresh_visible_curves(self) -> None:
+        if not self.managed_curves:
+            return
+
+        main_window = self.get_main_window()
+        if main_window is None:
+            return
+
+        view_box = self.getViewBox()
+        view_range = view_box.viewRange()
+        x_min, x_max = view_range[0]
+        y_min, y_max = view_range[1]
+        view_width = max(int(round(view_box.sceneBoundingRect().width())), 1)
+        view_height = max(int(round(view_box.sceneBoundingRect().height())), 1)
+        refresh_key = (x_min, x_max, y_min, y_max, view_width, view_height)
+        if self._last_refresh_key == refresh_key:
+            return
+
+        for curve in self.managed_curves:
+            full_x = np.asarray(curve["x_data"])
+            full_y = np.asarray(curve["y_data"])
+            sliced_x, sliced_y = main_window.slice_curve_to_range(full_x, full_y, x_min, x_max)
+            simplified_x, simplified_y = main_window.downsample_curve_to_viewport(
+                sliced_x,
+                sliced_y,
+                view_width,
+                view_height,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                max_point_factor=4.0,
+                min_points=1200,
+            )
+            curve["item"].setData(simplified_x, simplified_y)
+
+        self._last_refresh_key = refresh_key
 
     def notify_measurement(self, dt_seconds: float | None = None) -> None:
         main_window = self.get_main_window()
@@ -305,6 +372,11 @@ class CursorPlot(pg.PlotWidget):
                     other.showCursor()
 
         super().enterEvent(event)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        self._last_refresh_key = None
+        self.schedule_curve_refresh()
+        super().resizeEvent(event)
 
     def showCursor(self)->None:
         self.dataLoaded = True
