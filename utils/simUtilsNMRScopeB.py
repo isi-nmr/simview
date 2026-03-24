@@ -1,8 +1,36 @@
 import json
 import re
+from collections.abc import Mapping
 
 import numpy as np
 from PyQt6.QtWidgets import QMainWindow, QProgressDialog
+
+
+def _extract_numeric_series(payload: object) -> np.ndarray:
+    if isinstance(payload, Mapping):
+        for key in ("val", "values", "data"):
+            if key in payload:
+                return np.asarray(payload[key], dtype=float)
+        return np.asarray([], dtype=float)
+    return np.asarray(payload, dtype=float)
+
+
+def _extract_units(payload: object) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    for key in ("units", "unit"):
+        if key in payload:
+            return str(payload[key])
+    return ""
+
+
+def _extract_show(payload: object) -> bool:
+    if not isinstance(payload, Mapping):
+        return True
+    show_value = payload.get("show", True)
+    if isinstance(show_value, str):
+        return show_value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(show_value)
 
 
 def readNMRScopeBChannels(path_data:str|dict,progress:QProgressDialog,app:QMainWindow)->dict:
@@ -17,6 +45,9 @@ def readNMRScopeBChannels(path_data:str|dict,progress:QProgressDialog,app:QMainW
 
     channels = []
 
+    if not isinstance(data, Mapping):
+        raise TypeError("NMRScopeB payload must be a dictionary-like object")
+
     # Move gradients to the end...
     end_keys = ["gx", "gy", "gz"]
 
@@ -29,7 +60,7 @@ def readNMRScopeBChannels(path_data:str|dict,progress:QProgressDialog,app:QMainW
 
 
 
-    time = np.array(data["time"]["val"])*1e-3
+    time = _extract_numeric_series(data.get("time", [])) * 1e-3
 
     for channelName in new_data:
         if channelName == "time":
@@ -37,15 +68,17 @@ def readNMRScopeBChannels(path_data:str|dict,progress:QProgressDialog,app:QMainW
 
         plotType = "phase" if "phase" in channelName or "_p" in channelName else "mag"
 
-        dataNpy = np.array(new_data[channelName]["val"])
+        payload = new_data[channelName]
+        dataNpy = _extract_numeric_series(payload)
 
         if dataNpy.size != time.size:
             print (f"Array length does not match the time vector for channel {channelName}. Found {dataNpy.size} \
                 samples, time vector has {time.size} samples skipping...")
             continue
 
+        units = _extract_units(payload)
 
-        unitLabel = f"({new_data[channelName]["units"]})" if new_data[channelName]["units"] != '' else "(-)"
+        unitLabel = f"({units})" if units != '' else "(-)"
 
         channelDes = {
             "chanLabel": channelName +" "+unitLabel,
@@ -54,12 +87,12 @@ def readNMRScopeBChannels(path_data:str|dict,progress:QProgressDialog,app:QMainW
             "ind": str(0),
             "key": channelName,
             "plotType": plotType,
-            "units": new_data[channelName]["units"],
-            "raw_units": new_data[channelName]["units"],
+            "units": units,
+            "raw_units": units,
             "t": time,
             "data":dataNpy,
             "raw_data": dataNpy.copy(),
-            "show": new_data[channelName]["show"]=="yes"
+            "show": _extract_show(payload),
         }
         channelDes["annotations"] = []
         channels.append([channelDes])

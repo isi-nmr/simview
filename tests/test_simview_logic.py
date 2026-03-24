@@ -5,6 +5,7 @@ import pytest
 
 from simView import PROTON_GAMMA_MHZ_PER_T, GUIapp
 from utils.simUtilsBrkr import getRFEvents, readBrkrChannels
+from utils.simUtilsNMRScopeB import readNMRScopeBChannels
 
 
 def make_app() -> GUIapp:
@@ -55,6 +56,11 @@ def app_logic() -> GUIapp:
 @pytest.fixture
 def bruker_fixture_path() -> Path:
     return Path(__file__).resolve().parents[1] / "testData" / "mrScanSim"
+
+
+@pytest.fixture
+def nmrscopeb_fixture_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "testData" / "NMRScopeBData"
 
 
 def test_read_bruker_channels_from_fixture_loads_gradients_and_ncos(bruker_fixture_path: Path) -> None:
@@ -229,3 +235,36 @@ def test_get_pulse_program_location_uses_nearest_previous_event(app_logic: GUIap
     assert app_logic.get_pulse_program_location(0.0005) == "-"
     assert app_logic.get_pulse_program_location(0.0024) == "SliceSelection.mod:40 (ln 193)"
     assert app_logic.get_pulse_program_location(0.0031) == "DWELL-PROGRAM:0 (ln 8000000)"
+
+
+def test_read_nmrscopeb_channels_accepts_list_based_time_payload() -> None:
+    data = {
+        "time": [0.0, 1.0, 2.0],
+        "rf_am": {"val": [10.0, 20.0, 30.0], "units": "%", "show": "yes"},
+        "gx": {"val": [1.0, 2.0, 3.0], "units": "%", "show": "no"},
+    }
+
+    channels = readNMRScopeBChannels(data, DummyProgress(), DummyMainWindow())
+
+    assert len(channels) == 2
+    rf_channel = channels[0][0]
+    gx_channel = channels[1][0]
+    np.testing.assert_allclose(rf_channel["t"], np.array([0.0, 0.001, 0.002]))
+    assert rf_channel["show"] is True
+    assert gx_channel["show"] is False
+
+
+def test_read_nmrscopeb_channels_from_fixture_path(nmrscopeb_fixture_path: Path) -> None:
+    channels = readNMRScopeBChannels(str(nmrscopeb_fixture_path), DummyProgress(), DummyMainWindow())
+
+    assert channels is not None
+    assert len(channels) > 0
+    labels = [channel[0]["label"] for channel in channels]
+    assert "gx" in labels
+    assert "gy" in labels
+    assert "gz" in labels
+
+    gx_channel = next(channel[0] for channel in channels if channel[0]["label"] == "gx")
+    assert gx_channel["units"] == ""
+    assert gx_channel["chanLabel"].endswith("(-)")
+    assert gx_channel["t"].size == gx_channel["data"].size
