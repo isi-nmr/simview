@@ -106,3 +106,30 @@ def test_channel_checkbox_toggle_hides_plot_container(
     finally:
         gui.close()
         gui.deleteLater()
+
+
+def test_jump_to_next_and_previous_rf_pulse_updates_cursor_time(
+    qapp: QtWidgets.QApplication,
+    isolated_settings: None,
+) -> None:
+    data = {
+        "time": {"val": [0.0, 1.0, 2.0, 3.0, 4.0], "units": "ms", "show": "yes"},
+        "rf_am": {"val": [0.0, 10.0, 10.0, 0.0, 20.0], "units": "%", "show": "yes"},
+    }
+    gui = GUIapp(data=data)
+    try:
+        assert gui.nextRfPulseButton.isEnabled()
+        assert gui.prevRfPulseButton.isEnabled()
+
+        gui.update_status(cursor_time=0.0)
+        gui.jump_to_next_rf_pulse()
+        assert np.isclose(float(gui.currentCursorTime), 0.001)
+
+        gui.jump_to_next_rf_pulse()
+        assert np.isclose(float(gui.currentCursorTime), 0.004)
+
+        gui.jump_to_previous_rf_pulse()
+        assert np.isclose(float(gui.currentCursorTime), 0.001)
+    finally:
+        gui.close()
+        gui.deleteLater()

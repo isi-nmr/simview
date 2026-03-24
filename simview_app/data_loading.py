@@ -68,6 +68,15 @@ class DataLoadingMixin:
         self.pulseProgramSource = None
         self.pulseProgramTimeline = None
         self.pulseProgramLineMapping = {}
+        self.rfPulseStartTimes = None
+        if hasattr(self, "prevRfPulseButton"):
+            self.prevRfPulseButton.setEnabled(False)
+        if hasattr(self, "nextRfPulseButton"):
+            self.nextRfPulseButton.setEnabled(False)
+        if hasattr(self, "prevRfPulseAction"):
+            self.prevRfPulseAction.setEnabled(False)
+        if hasattr(self, "nextRfPulseAction"):
+            self.nextRfPulseAction.setEnabled(False)
 
     def loadData(self, data: str | None = None) -> None:
         self.resetApp()
@@ -120,6 +129,7 @@ class DataLoadingMixin:
         for plot in self.plots:
             plot.showCursor()
             plot.set_interaction_mode(self.interactionMode)
+        self.update_rf_pulse_navigation_state()
         self.update_status(cursor_time=None, measurement=self.currentMeasurement)
 
     def registerCheckBoxes(self) -> None:

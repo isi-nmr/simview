@@ -268,3 +268,40 @@ def test_read_nmrscopeb_channels_from_fixture_path(nmrscopeb_fixture_path: Path)
     assert gx_channel["units"] == ""
     assert gx_channel["chanLabel"].endswith("(-)")
     assert gx_channel["t"].size == gx_channel["data"].size
+
+
+def test_detect_rf_pulse_starts_from_nco_channels(app_logic: GUIapp) -> None:
+    app_logic.channels = [
+        [
+            {
+                "type": "NCO",
+                "key": "am",
+                "t": np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+                "data": np.array([0.0, 10.0, 10.0, 0.0, 5.0]),
+            },
+        ],
+        [
+            {
+                "type": "NCO",
+                "key": "rgp",
+                "t": np.array([0.0, 0.5, 1.5]),
+                "data": np.array([0.0, 1.0, 0.0]),
+            },
+        ],
+    ]
+
+    starts = app_logic.detect_rf_pulse_starts()
+
+    np.testing.assert_allclose(starts, np.array([1.0, 4.0]))
+
+
+def test_jump_to_next_and_previous_rf_pulse_target_selection(app_logic: GUIapp) -> None:
+    app_logic.rfPulseStartTimes = np.array([1.0, 2.0, 4.0])
+    app_logic.currentCursorTime = 1.5
+    captured: list[float] = []
+    app_logic.jump_to_rf_pulse_time = lambda target_time: captured.append(float(target_time))
+
+    app_logic.jump_to_next_rf_pulse()
+    app_logic.jump_to_previous_rf_pulse()
+
+    np.testing.assert_allclose(np.array(captured), np.array([2.0, 1.0]))

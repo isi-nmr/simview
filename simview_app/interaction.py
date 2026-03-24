@@ -91,6 +91,8 @@ class InteractionMixin:
         QtGui.QShortcut(QtGui.QKeySequence("E"), self, activated=self.snapMeasureAction.toggle)
         QtGui.QShortcut(QtGui.QKeySequence("T"), self, activated=self.zeroTrajectoryAtCursorAction.trigger)
         QtGui.QShortcut(QtGui.QKeySequence("J"), self, activated=self.jumpToPpgLineAction.trigger)
+        QtGui.QShortcut(QtGui.QKeySequence("["), self, activated=self.jump_to_previous_rf_pulse)
+        QtGui.QShortcut(QtGui.QKeySequence("]"), self, activated=self.jump_to_next_rf_pulse)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Left), self, activated=self.jumpXNeg)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Right), self, activated=self.jumpXPos)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_F1), self, activated=self.showShortcutsHelp)
@@ -107,6 +109,7 @@ class InteractionMixin:
             "<b>Z</b> Toggle zoom mode<br>"
             "<b>E</b> Toggle measure snap to events<br>"
             "<b>T</b> Zero trajectory at cursor<br>"
+            "<b>[ / ]</b> Jump previous / next RF pulse<br>"
             "<b>F1</b> Show this help<br><br>"
             "<b>Mouse controls</b><br><br>"
             "<b>Move mouse</b> Inspect synced cursor across plots<br>"
@@ -164,6 +167,89 @@ class InteractionMixin:
         self.settings.remove("trajectoryZeroReferenceTime")
         self.apply_trajectory_zero_in_place()
         self.update_status()
+
+    def detect_rf_pulse_starts(self) -> np.ndarray:
+        if not self.channels:
+            return np.asarray([], dtype=float)
+
+        pulse_start_times: list[float] = []
+        for channel in self.channels:
+            for line in channel:
+                if str(line.get("type", "")).upper() != "NCO":
+                    continue
+                key = str(line.get("key", "")).lower()
+                is_amplitude_key = key == "am" or key.endswith("_am")
+                if not is_amplitude_key:
+                    continue
+
+                time_values = np.asarray(line.get("t", []), dtype=float)
+                data_values = np.asarray(line.get("data", []), dtype=float)
+                if time_values.size == 0 or data_values.size == 0:
+                    continue
+                norm_time, norm_data = self.normalize_time_series(time_values, data_values)
+                if norm_time.size == 0 or norm_data.size == 0:
+                    continue
+
+                threshold = 1e-12
+                active = norm_data > threshold
+                rise_indices = np.flatnonzero(active & np.concatenate(([True], ~active[:-1])))
+                pulse_start_times.extend(float(norm_time[index]) for index in rise_indices)
+
+        if not pulse_start_times:
+            return np.asarray([], dtype=float)
+        return np.asarray(sorted(set(pulse_start_times)), dtype=float)
+
+    def update_rf_pulse_navigation_state(self) -> None:
+        pulse_times = self.detect_rf_pulse_starts()
+        self.rfPulseStartTimes = pulse_times
+        has_pulses = pulse_times.size > 0
+
+        if hasattr(self, "prevRfPulseButton"):
+            self.prevRfPulseButton.setEnabled(has_pulses)
+        if hasattr(self, "nextRfPulseButton"):
+            self.nextRfPulseButton.setEnabled(has_pulses)
+        if hasattr(self, "prevRfPulseAction"):
+            self.prevRfPulseAction.setEnabled(has_pulses)
+        if hasattr(self, "nextRfPulseAction"):
+            self.nextRfPulseAction.setEnabled(has_pulses)
+
+    def jump_to_rf_pulse_time(self, target_time: float) -> None:
+        if not self.plots:
+            return
+        target = float(target_time)
+        self.tPos = target
+        self.updateView()
+        for plot in self.plots:
+            plot.cursor_line.setPos(target)
+        self.update_status(cursor_time=target)
+
+    def jump_to_next_rf_pulse(self) -> None:
+        pulse_times = np.asarray(getattr(self, "rfPulseStartTimes", []), dtype=float)
+        if pulse_times.size == 0:
+            dialog.showErrorMessage("No RF pulse starts were detected in the loaded channels.")
+            return
+
+        cursor_time = self.currentCursorTime
+        if cursor_time is None:
+            target_index = 0
+        else:
+            target_index = int(np.searchsorted(pulse_times, float(cursor_time) + 1e-15, side="right"))
+            target_index = min(target_index, pulse_times.size - 1)
+        self.jump_to_rf_pulse_time(float(pulse_times[target_index]))
+
+    def jump_to_previous_rf_pulse(self) -> None:
+        pulse_times = np.asarray(getattr(self, "rfPulseStartTimes", []), dtype=float)
+        if pulse_times.size == 0:
+            dialog.showErrorMessage("No RF pulse starts were detected in the loaded channels.")
+            return
+
+        cursor_time = self.currentCursorTime
+        if cursor_time is None:
+            target_index = pulse_times.size - 1
+        else:
+            target_index = int(np.searchsorted(pulse_times, float(cursor_time) - 1e-15, side="left") - 1)
+            target_index = max(target_index, 0)
+        self.jump_to_rf_pulse_time(float(pulse_times[target_index]))
 
     def setInteractionMode(self, mode: str) -> None:
         self.interactionMode = mode

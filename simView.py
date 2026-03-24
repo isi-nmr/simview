@@ -47,6 +47,7 @@ class GUIapp(
         self.pulseProgramSource = None
         self.pulseProgramTimeline = None
         self.pulseProgramLineMapping = {}
+        self.rfPulseStartTimes = None
         self.gradientCalibrationHzPerMm = 0.0
         self.nucleusGammaMHzPerT = PROTON_GAMMA_MHZ_PER_T
         self.displayGradientsInMtPerM = False
@@ -66,12 +67,20 @@ class GUIapp(
         self.tSlider = QtWidgets.QSlider(Qt.Orientation.Horizontal)
         self.jumpPButton = QtWidgets.QPushButton()
         self.jumpNButton = QtWidgets.QPushButton()
+        self.prevRfPulseButton = QtWidgets.QPushButton("Prev RF")
+        self.nextRfPulseButton = QtWidgets.QPushButton("Next RF")
         self.jumpPButton.setText("->")
         self.jumpNButton.setText("<-")
         self.jumpPButton.setFixedHeight(50)
         self.jumpNButton.setFixedHeight(50)
+        self.prevRfPulseButton.setFixedHeight(50)
+        self.nextRfPulseButton.setFixedHeight(50)
+        self.prevRfPulseButton.setEnabled(False)
+        self.nextRfPulseButton.setEnabled(False)
         self.jumpNButton.clicked.connect(self.jumpXNeg)
         self.jumpPButton.clicked.connect(self.jumpXPos)
+        self.prevRfPulseButton.clicked.connect(self.jump_to_previous_rf_pulse)
+        self.nextRfPulseButton.clicked.connect(self.jump_to_next_rf_pulse)
         self.tSlider.valueChanged.connect(self.changeXRange)
         self.tSlider.setMinimum(0)
         self.tSlider.setMaximum(10000)
@@ -111,9 +120,11 @@ class GUIapp(
 
         buttonLayout = QtWidgets.QHBoxLayout()
         buttonLayout.addWidget(self.jumpNButton)
+        buttonLayout.addWidget(self.prevRfPulseButton)
         buttonLayout.addWidget(self.zoomOutButton)
         buttonLayout.addWidget(self.zoomInButton)
         buttonLayout.addWidget(self.resetViewButton)
+        buttonLayout.addWidget(self.nextRfPulseButton)
         buttonLayout.addWidget(self.jumpPButton)
         buttonLayout.addWidget(self.zoomModeButton)
         buttonLayout.addWidget(self.measureButton)
@@ -146,6 +157,14 @@ class GUIapp(
         self.zeroTrajectoryAtCursorAction = QtGui.QAction("Zero Trajectory At Cursor", self)
         self.zeroTrajectoryAtCursorAction.triggered.connect(self.zero_trajectory_at_cursor)
         viewMenu.addAction(self.zeroTrajectoryAtCursorAction)
+
+        self.prevRfPulseAction = QtGui.QAction("Jump To Previous RF Pulse", self)
+        self.prevRfPulseAction.triggered.connect(self.jump_to_previous_rf_pulse)
+        viewMenu.addAction(self.prevRfPulseAction)
+
+        self.nextRfPulseAction = QtGui.QAction("Jump To Next RF Pulse", self)
+        self.nextRfPulseAction.triggered.connect(self.jump_to_next_rf_pulse)
+        viewMenu.addAction(self.nextRfPulseAction)
 
         self.resetTrajectoryZeroAction = QtGui.QAction("Reset Trajectory Zero", self)
         self.resetTrajectoryZeroAction.triggered.connect(self.reset_trajectory_zero)
