@@ -46,6 +46,7 @@ class GUIapp(QMainWindow):
         self.measureSnapToEvents = False
         self.gradientCalibrationHzPerMm = 0.0
         self.displayGradientsInMtPerM = False
+        self.trajectoryZeroReferenceTime: float | None = None
         self.inlineData = data
 
         path = Path(__file__).resolve().parent / "visusimForm.ui"
@@ -146,6 +147,14 @@ class GUIapp(QMainWindow):
         self.snapMeasureAction.toggled.connect(self.toggleMeasureSnapToEvents)
         viewMenu.addAction(self.snapMeasureAction)
 
+        self.zeroTrajectoryAtCursorAction = QtGui.QAction("Zero Trajectory At Cursor", self)
+        self.zeroTrajectoryAtCursorAction.triggered.connect(self.zero_trajectory_at_cursor)
+        viewMenu.addAction(self.zeroTrajectoryAtCursorAction)
+
+        self.resetTrajectoryZeroAction = QtGui.QAction("Reset Trajectory Zero", self)
+        self.resetTrajectoryZeroAction.triggered.connect(self.reset_trajectory_zero)
+        viewMenu.addAction(self.resetTrajectoryZeroAction)
+
         shortcutsHelpAction = QtGui.QAction("Shortcuts", self)
         shortcutsHelpAction.setShortcut(QtGui.QKeySequence(Qt.Key.Key_F1))
         shortcutsHelpAction.triggered.connect(self.showShortcutsHelp)
@@ -158,6 +167,10 @@ class GUIapp(QMainWindow):
 
         self.gradientCalibrationHzPerMm = float(self.settings.value("gradientCalibrationHzPerMm", 0.0, type=float))
         self.displayGradientsInMtPerM = bool(self.settings.value("displayGradientsInMtPerM", False, type=bool))
+        stored_trajectory_zero = self.settings.value("trajectoryZeroReferenceTime", None)
+        self.trajectoryZeroReferenceTime = (
+            float(stored_trajectory_zero) if stored_trajectory_zero not in {None, ""} else None
+        )
 
         self.selectedChannels = self.settings.value("selectedChannels", [])
         if not isinstance(self.selectedChannels, list):
@@ -266,6 +279,7 @@ class GUIapp(QMainWindow):
         QtGui.QShortcut(QtGui.QKeySequence("M"), self, activated=self.measureButton.toggle)
         QtGui.QShortcut(QtGui.QKeySequence("Z"), self, activated=self.zoomModeButton.toggle)
         QtGui.QShortcut(QtGui.QKeySequence("E"), self, activated=self.snapMeasureAction.toggle)
+        QtGui.QShortcut(QtGui.QKeySequence("T"), self, activated=self.zeroTrajectoryAtCursorAction.trigger)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Left), self, activated=self.jumpXNeg)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Right), self, activated=self.jumpXPos)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_F1), self, activated=self.showShortcutsHelp)
@@ -281,6 +295,7 @@ class GUIapp(QMainWindow):
             "<b>M</b> Toggle measure mode<br>"
             "<b>Z</b> Toggle zoom mode<br>"
             "<b>E</b> Toggle measure snap to events<br>"
+            "<b>T</b> Zero trajectory at cursor<br>"
             "<b>F1</b> Show this help<br><br>"
             "<b>Mouse controls</b><br><br>"
             "<b>Move mouse</b> Inspect synced cursor across plots<br>"
@@ -312,6 +327,21 @@ class GUIapp(QMainWindow):
     def toggleMeasureSnapToEvents(self, checked: bool) -> None:
         self.measureSnapToEvents = checked
         self.settings.setValue("measureSnapToEvents", checked)
+        self.update_status()
+
+    def zero_trajectory_at_cursor(self) -> None:
+        if self.currentCursorTime is None:
+            dialog.showErrorMessage("Move the cursor over a plot before zeroing trajectory.")
+            return
+        self.trajectoryZeroReferenceTime = float(self.currentCursorTime)
+        self.settings.setValue("trajectoryZeroReferenceTime", self.trajectoryZeroReferenceTime)
+        self.apply_trajectory_zero_in_place()
+        self.update_status()
+
+    def reset_trajectory_zero(self) -> None:
+        self.trajectoryZeroReferenceTime = None
+        self.settings.remove("trajectoryZeroReferenceTime")
+        self.apply_trajectory_zero_in_place()
         self.update_status()
 
     def setInteractionMode(self, mode: str) -> None:
@@ -485,6 +515,38 @@ class GUIapp(QMainWindow):
         trajectory[1:] = np.cumsum(interval_area)
         return trajectory
 
+    def zero_trajectory_to_reference(self, time: np.ndarray, trajectory: np.ndarray) -> np.ndarray:
+        if self.trajectoryZeroReferenceTime is None or time.size == 0 or trajectory.size == 0:
+            return trajectory
+
+        reference_value = float(
+            np.interp(
+                self.trajectoryZeroReferenceTime,
+                np.asarray(time, dtype=float),
+                np.asarray(trajectory, dtype=float),
+                left=float(trajectory[0]),
+                right=float(trajectory[-1]),
+            ),
+        )
+        return np.asarray(trajectory, dtype=float) - reference_value
+
+    def apply_trajectory_zero_in_place(self) -> None:
+        if not self.channels:
+            return
+
+        for plot_index, (channel, plot) in enumerate(zip(self.channels, self.plots, strict=False)):
+            if not channel or channel[0].get("chanLabel") != "Gradient Trajectory":
+                continue
+
+            for line_index, line in enumerate(channel):
+                raw_trajectory = np.asarray(line.get("raw_data", line.get("data", [])), dtype=float)
+                time = np.asarray(line.get("t", []), dtype=float)
+                zeroed_trajectory = self.zero_trajectory_to_reference(time, raw_trajectory)
+                line["data"] = zeroed_trajectory
+
+                if line_index < len(plot.managed_curves):
+                    plot.update_managed_curve(line_index, time, zeroed_trajectory)
+
     def build_gradient_derived_channels(self) -> list[list[dict]]:
         gradient_axes: dict[str, dict] = {}
         for channel in self.channels:
@@ -542,6 +604,8 @@ class GUIapp(QMainWindow):
                 traj_data = self.compute_gradient_trajectory(time, data)
                 traj_units = f"{display_units}*s" if display_units else "a.u.*s"
 
+            traj_data = self.zero_trajectory_to_reference(traj_time, traj_data)
+
             slew_channel.append(
                 {
                     "chanLabel": "Gradient Slew Rate",
@@ -569,6 +633,7 @@ class GUIapp(QMainWindow):
                     "plotType": "mag",
                     "units": traj_units,
                     "t": traj_time,
+                    "raw_data": traj_data.copy(),
                     "data": traj_data,
                     "annotations": [],
                     "pen": pen,
@@ -730,6 +795,7 @@ class GUIapp(QMainWindow):
         for axis_name in ("left", "right", "bottom", "top"):
             source_axis = source_item.getAxis(axis_name)
             export_item.showAxis(axis_name, show=source_axis.isVisible())
+            export_item.getAxis(axis_name).enableAutoSIPrefix(False)
 
         export_item.getAxis("left").setWidth(60)
         export_item.getAxis("right").setWidth(60)
@@ -866,7 +932,9 @@ class GUIapp(QMainWindow):
                 QPageSize.Unit.Point,
             )
             pdf_writer.setPageSize(page_size)
-            pdf_writer.setPageMargins(QMarginsF(page_margin, page_margin, page_margin, page_margin), QPageLayout.Unit.Point)
+            pdf_writer.setPageMargins(
+                QMarginsF(page_margin, page_margin, page_margin, page_margin), QPageLayout.Unit.Point
+            )
 
             painter = QPainter(pdf_writer)
             try:
@@ -909,7 +977,9 @@ class GUIapp(QMainWindow):
             try:
                 from pyqtgraph.exporters import SVGExporter
             except ImportError:
-                dialog.showErrorMessage("SVG export is unavailable because PyQtGraph SVG exporters could not be loaded.")
+                dialog.showErrorMessage(
+                    "SVG export is unavailable because PyQtGraph SVG exporters could not be loaded."
+                )
                 return
 
         export_dir = target_path.parent
@@ -1155,8 +1225,10 @@ class GUIapp(QMainWindow):
             plotItem.showAxis("right", show=True)
             axis = currentPlot.getPlotItem().getAxis("right")
             axis.setWidth(60)  # fixed width in pixels
+            axis.enableAutoSIPrefix(False)
             axis = currentPlot.getPlotItem().getAxis("left")
             axis.setWidth(60)  # fixed width in pixels
+            axis.enableAutoSIPrefix(False)
 
             self.checkBoxes[chanInd].contID = len(self.plotContainers) - 1
 

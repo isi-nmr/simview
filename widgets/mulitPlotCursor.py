@@ -116,6 +116,20 @@ class CursorPlot(pg.PlotWidget):
         self.schedule_curve_refresh()
         return plot_curve
 
+    def update_managed_curve(self, index: int, x_data: np.ndarray, y_data: np.ndarray) -> None:
+        if index < 0 or index >= len(self.managed_curves):
+            return
+
+        self.managed_curves[index]["x_data"] = x_data
+        self.managed_curves[index]["y_data"] = y_data
+
+        if index < len(self.curve_cache):
+            curve_name, _, _ = self.curve_cache[index]
+            self.curve_cache[index] = (curve_name, x_data, y_data)
+
+        self._last_refresh_key = None
+        self.schedule_curve_refresh()
+
     def schedule_curve_refresh(self, *args: object) -> None:
         if not self.managed_curves:
             return
