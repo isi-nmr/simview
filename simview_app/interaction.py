@@ -28,6 +28,7 @@ class InteractionMixin:
         palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
         palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
         palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
+        palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(190, 190, 190))
         return palette
 
     def get_theme_palette(self, theme_mode: str) -> tuple[QPalette, bool]:
@@ -46,9 +47,18 @@ class InteractionMixin:
             return
 
         palette, dark_mode = self.get_theme_palette(self.themeMode)
+        if dark_mode:
+            palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(190, 190, 190))
+        else:
+            palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(110, 110, 110))
         qt_app.setPalette(palette)
         self.setPalette(palette)
         self.darkMode = dark_mode
+
+        if hasattr(self, "channelFilter"):
+            filter_palette = self.channelFilter.palette()
+            filter_palette.setColor(QPalette.ColorRole.PlaceholderText, palette.color(QPalette.ColorRole.PlaceholderText))
+            self.channelFilter.setPalette(filter_palette)
 
         if self.darkMode:
             pg.setConfigOption("background", "black")
