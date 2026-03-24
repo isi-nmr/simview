@@ -52,7 +52,7 @@ class GUIapp(
         self.displayGradientsInMtPerM = False
         self.themeMode = "system"
         self.trajectoryZeroReferenceTime: float | None = None
-        self.derivedSignalStartupPadding = 1.0
+        self.derivedSignalStartupPadding = 0.010
         self.inlineData = data
 
         path = Path(__file__).resolve().parent / "visusimForm.ui"
@@ -166,7 +166,7 @@ class GUIapp(
             self.settings.value("displayGradientsInMtPerM", default_false, type=bool),
         )
         self.themeMode = str(self.settings.value("themeMode", "system")).lower()
-        self.derivedSignalStartupPadding = float(self.settings.value("derivedSignalStartupPadding", 1.0, type=float))
+        self.derivedSignalStartupPadding = float(self.settings.value("derivedSignalStartupPadding", 1e-2, type=float))
         stored_trajectory_zero = self.settings.value("trajectoryZeroReferenceTime", None)
         self.trajectoryZeroReferenceTime = (
             float(stored_trajectory_zero) if stored_trajectory_zero not in {None, ""} else None
