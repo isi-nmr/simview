@@ -42,6 +42,7 @@ class GUIapp(QMainWindow):
         self.interactionMode = "inspect"
         self.currentMeasurement = None
         self.currentCursorTime = None
+        self.measureSnapToEvents = False
 
         path = Path(__file__).resolve().parent / "visusimForm.ui"
         uic.loadUi(path, self)
@@ -123,6 +124,7 @@ class GUIapp(QMainWindow):
         # Menu bar
         menubar = self.menuBar()
         fileMenu = menubar.addMenu("File")
+        viewMenu = menubar.addMenu("View")
         helpMenu = menubar.addMenu("Help")
 
         # Add "Open Folder" action
@@ -134,6 +136,12 @@ class GUIapp(QMainWindow):
         exportPlotsAction.triggered.connect(self.export_visible_plots)
         fileMenu.addAction(exportPlotsAction)
 
+        self.snapMeasureAction = QtGui.QAction("Stick Measurements To Events", self)
+        self.snapMeasureAction.setCheckable(True)
+        self.snapMeasureAction.setChecked(self.measureSnapToEvents)
+        self.snapMeasureAction.toggled.connect(self.toggleMeasureSnapToEvents)
+        viewMenu.addAction(self.snapMeasureAction)
+
         shortcutsHelpAction = QtGui.QAction("Shortcuts", self)
         shortcutsHelpAction.setShortcut(QtGui.QKeySequence(Qt.Key.Key_F1))
         shortcutsHelpAction.triggered.connect(self.showShortcutsHelp)
@@ -141,6 +149,8 @@ class GUIapp(QMainWindow):
 
         # Create settings object
         self.settings = QSettings("MR_ISIBrno", "BrukerSimView")
+        self.measureSnapToEvents = bool(self.settings.value("measureSnapToEvents", False, type=bool))
+        self.snapMeasureAction.setChecked(self.measureSnapToEvents)
 
         self.selectedChannels = self.settings.value("selectedChannels", [])
         if not isinstance(self.selectedChannels, list):
@@ -216,6 +226,7 @@ class GUIapp(QMainWindow):
         QtGui.QShortcut(QtGui.QKeySequence("R"), self, activated=self.resetView)
         QtGui.QShortcut(QtGui.QKeySequence("M"), self, activated=self.measureButton.toggle)
         QtGui.QShortcut(QtGui.QKeySequence("Z"), self, activated=self.zoomModeButton.toggle)
+        QtGui.QShortcut(QtGui.QKeySequence("E"), self, activated=self.snapMeasureAction.toggle)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Left), self, activated=self.jumpXNeg)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Right), self, activated=self.jumpXPos)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_F1), self, activated=self.showShortcutsHelp)
@@ -230,6 +241,7 @@ class GUIapp(QMainWindow):
             "<b>R</b> Reset full view<br>"
             "<b>M</b> Toggle measure mode<br>"
             "<b>Z</b> Toggle zoom mode<br>"
+            "<b>E</b> Toggle measure snap to events<br>"
             "<b>F1</b> Show this help<br><br>"
             "<b>Mouse controls</b><br><br>"
             "<b>Move mouse</b> Inspect synced cursor across plots<br>"
@@ -257,6 +269,11 @@ class GUIapp(QMainWindow):
             self.setInteractionMode("zoom")
         elif self.interactionMode == "zoom":
             self.setInteractionMode("inspect")
+
+    def toggleMeasureSnapToEvents(self, checked: bool) -> None:
+        self.measureSnapToEvents = checked
+        self.settings.setValue("measureSnapToEvents", checked)
+        self.update_status()
 
     def setInteractionMode(self, mode: str) -> None:
         self.interactionMode = mode
@@ -717,8 +734,9 @@ class GUIapp(QMainWindow):
         span_text = self.format_time(getattr(self, "windowWidth", None))
         cursor_text = self.format_time(self.currentCursorTime)
         measurement_text = self.format_time(self.currentMeasurement)
+        snap_text = "On" if self.measureSnapToEvents else "Off"
         self.statusBar().showMessage(
-            f"Mode: {mode_text} | View width: {span_text} | Cursor: {cursor_text} | Measurement: {measurement_text}"
+            f"Mode: {mode_text} | Snap: {snap_text} | View width: {span_text} | Cursor: {cursor_text} | Measurement: {measurement_text}"
         )
 
     def resetApp(self) -> None:

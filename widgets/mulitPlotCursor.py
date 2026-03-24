@@ -164,6 +164,28 @@ class CursorPlot(pg.PlotWidget):
         if main_window is not None:
             main_window.update_status(measurement=dt_seconds)
 
+    def get_snapped_event_x(self, x_value: float) -> float:
+        main_window = self.get_main_window()
+        if main_window is None or not getattr(main_window, "measureSnapToEvents", False):
+            return x_value
+
+        nearest_x = x_value
+        nearest_distance = float("inf")
+        for _, cx, _ in self.curve_cache:
+            if cx.size == 0:
+                continue
+
+            insert_index = int(np.searchsorted(cx, x_value, side="left"))
+            candidate_indices = {min(max(insert_index - 1, 0), cx.size - 1), min(insert_index, cx.size - 1)}
+            for candidate_index in candidate_indices:
+                candidate_x = float(cx[candidate_index])
+                distance = abs(candidate_x - x_value)
+                if distance < nearest_distance:
+                    nearest_distance = distance
+                    nearest_x = candidate_x
+
+        return nearest_x
+
     def mousePressEvent(self, event:QMouseEvent)->None:
         mouse_point = self.getViewBox().mapSceneToView(event.position())
         modifiers = QApplication.keyboardModifiers()
@@ -180,7 +202,7 @@ class CursorPlot(pg.PlotWidget):
                         other.measure_mode = False
 
                 # First click → start measuring
-                self.start_x = mouse_point.x()
+                self.start_x = self.get_snapped_event_x(mouse_point.x())
 
                 # Create temporary region
                 self.temp_region = pg.LinearRegionItem(
@@ -196,7 +218,15 @@ class CursorPlot(pg.PlotWidget):
 
             else:
                 # Second click → finish measurement
-                delta_t = abs(mouse_point.x() - self.start_x)
+                end_x = self.get_snapped_event_x(mouse_point.x())
+                delta_t = abs(end_x - self.start_x)
+                if self.temp_region:
+                    self.temp_region.setRegion((self.start_x, end_x))
+                if self.temp_text:
+                    mid_x = (self.start_x + end_x) / 2
+                    bottom_y = self.viewRange()[1][0]
+                    self.temp_text.setText(f"Δt = {self.format_time(delta_t)}")
+                    self.temp_text.setPos(mid_x, bottom_y)
                 self.notify_measurement(delta_t)
                 self.measure_mode = False
                 self.start_x = None  # reset start for next measurement
@@ -298,7 +328,7 @@ class CursorPlot(pg.PlotWidget):
 
         # Update measurement region dynamically
         if self.measure_mode and self.start_x is not None:
-            end_x = mouse_point.x()
+            end_x = self.get_snapped_event_x(mouse_point.x())
             # Update LinearRegionItem
             self.temp_region.setRegion((self.start_x, end_x))
             # Update text at midpoint
