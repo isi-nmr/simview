@@ -214,10 +214,7 @@ class GUIapp(
 
         self.settingsTab = QtWidgets.QWidget()
         self.settingsLayout = QVBoxLayout(self.settingsTab)
-        self.scannerSettingsHint = QtWidgets.QLabel(
-            "Gradient channels are loaded in percent. Enter the scanner calibration at 100% to scale them to Hz/mm."
-        )
-        self.scannerSettingsHint.setWordWrap(True)
+
         self.gradientCalibrationSpinBox = QtWidgets.QDoubleSpinBox()
         self.gradientCalibrationSpinBox.setDecimals(3)
         self.gradientCalibrationSpinBox.setRange(0.0, 1_000_000.0)
@@ -247,17 +244,52 @@ class GUIapp(
         self.derivedSignalStartupPaddingSpinBox.setValue(self.derivedSignalStartupPadding)
         self.displayGradientsInMtPerMCheckBox = QtWidgets.QCheckBox("Display physical gradients in mT/m")
         self.displayGradientsInMtPerMCheckBox.setChecked(self.displayGradientsInMtPerM)
-        self.applyScannerSettingsButton = QtWidgets.QPushButton("Apply Scanner Settings")
+        self.applyScannerSettingsButton = QtWidgets.QPushButton("Apply Settings")
         self.applyScannerSettingsButton.clicked.connect(self.apply_scanner_settings)
-        self.settingsFormLayout = QtWidgets.QFormLayout()
-        self.settingsFormLayout.addRow("Theme", self.themeModeComboBox)
-        self.settingsFormLayout.addRow("Grad Calibration", self.gradientCalibrationSpinBox)
-        self.settingsFormLayout.addRow("Nucleus Gamma", self.nucleusGammaSpinBox)
-        self.settingsFormLayout.addRow("Max Grad @ 100%", self.maxGradientStrengthValue)
-        self.settingsFormLayout.addRow("Startup Padding", self.derivedSignalStartupPaddingSpinBox)
-        self.settingsLayout.addWidget(self.scannerSettingsHint)
-        self.settingsLayout.addLayout(self.settingsFormLayout)
-        self.settingsLayout.addWidget(self.displayGradientsInMtPerMCheckBox)
+
+        appearanceGroup = QtWidgets.QGroupBox("Appearance")
+        appearanceLayout = QtWidgets.QFormLayout(appearanceGroup)
+        appearanceLayout.addRow("Theme", self.themeModeComboBox)
+
+        scannerGroup = QtWidgets.QGroupBox("Scanner Calibration")
+        scannerGroupLayout = QtWidgets.QVBoxLayout(scannerGroup)
+        scannerLayout = QtWidgets.QFormLayout()
+        self.scannerSettingsHint = QtWidgets.QLabel(
+            "Gradient channels are loaded in percent. Enter calibration at 100% to scale them to Hz/mm."
+        )
+        self.scannerSettingsHint.setWordWrap(True)
+        self.scannerSettingsHint.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.MinimumExpanding,
+        )
+        scannerGroupLayout.addWidget(self.scannerSettingsHint)
+        scannerLayout.addRow("Grad Calibration", self.gradientCalibrationSpinBox)
+        scannerLayout.addRow("Nucleus Gamma", self.nucleusGammaSpinBox)
+        scannerLayout.addRow("Max Grad @ 100%", self.maxGradientStrengthValue)
+        scannerLayout.addRow(self.displayGradientsInMtPerMCheckBox)
+        scannerGroupLayout.addLayout(scannerLayout)
+
+        derivedSignalsGroup = QtWidgets.QGroupBox("Derived Signals")
+        derivedSignalsLayout = QtWidgets.QFormLayout(derivedSignalsGroup)
+        derivedSignalsLayout.addRow("Startup Padding", self.derivedSignalStartupPaddingSpinBox)
+
+        group_box_style = """
+            QGroupBox {
+                margin-top: 0.8em;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+            }
+        """
+        appearanceGroup.setStyleSheet(group_box_style)
+        scannerGroup.setStyleSheet(group_box_style)
+        derivedSignalsGroup.setStyleSheet(group_box_style)
+
+        self.settingsLayout.addWidget(appearanceGroup)
+        self.settingsLayout.addWidget(scannerGroup)
+        self.settingsLayout.addWidget(derivedSignalsGroup)
         self.settingsLayout.addWidget(self.applyScannerSettingsButton)
         self.settingsLayout.addStretch(1)
         self.gradientCalibrationSpinBox.valueChanged.connect(self.update_scanner_settings_display)
