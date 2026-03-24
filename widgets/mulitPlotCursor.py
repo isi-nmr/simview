@@ -499,16 +499,17 @@ class CursorPlot(pg.PlotWidget):
         if not self.sceneBoundingRect().contains(pos):
             return
 
-        mouse_point = self.getViewBox().mapSceneToView(pos)
-        x = mouse_point.x()
-        if self.last_cursor_x is not None and abs(x - self.last_cursor_x) < 1e-12:
+        view_mouse_point = self.getViewBox().mapSceneToView(pos)
+        x_raw = float(view_mouse_point.x())
+        x_display = self.get_snapped_event_x(x_raw) if self.measure_mode else x_raw
+        if self.last_cursor_x is not None and abs(x_display - self.last_cursor_x) < 1e-12:
             return
-        self.last_cursor_x = x
-        self.cursor_line.setPos(mouse_point.x())
+        self.last_cursor_x = x_display
+        self.cursor_line.setPos(x_display)
 
-        mouse_point = self.plotItem.vb.mapSceneToView(pos)
-        x_val = mouse_point.x()
-        y_val = mouse_point.y()
+        plot_mouse_point = self.plotItem.vb.mapSceneToView(pos)
+        x_val = x_display
+        y_val = plot_mouse_point.y()
 
         # Loop over all curves to find the nearest point
 
@@ -524,22 +525,22 @@ class CursorPlot(pg.PlotWidget):
         main_window = self.get_main_window()
         if main_window is not None:
             for other in main_window.plots:
-                other.cursor_line.setPos(mouse_point.x())
+                other.cursor_line.setPos(x_display)
                 # Update timestamp label at bottom-right corner
                 view_rect = other.viewRect()
                 other.timestamp_label.setPos(view_rect.right(), view_rect.bottom())
-                other.timestamp_label.setText(f"t = {x * 1e3:.2f} ms")
-            main_window.update_status(cursor_time=x)
+                other.timestamp_label.setText(f"t = {x_display * 1e3:.2f} ms")
+            main_window.update_status(cursor_time=x_display)
 
         # Update timestamp label at bottom-right corner
         view_rect = self.viewRect()
         self.timestamp_label.setPos(view_rect.right(), view_rect.bottom())
-        self.timestamp_label.setText(f"t = {x * 1e3:.2f} ms")
+        self.timestamp_label.setText(f"t = {x_display * 1e3:.2f} ms")
 
         # Update measurement region dynamically
         shared_start_x = getattr(main_window, "measurement_start_x", None) if main_window is not None else self.start_x
         if self.measure_mode and shared_start_x is not None:
-            end_x = self.get_snapped_event_x(mouse_point.x())
+            end_x = x_display
             delta_t = abs(end_x - shared_start_x)
             if main_window is not None:
                 for other in main_window.plots:
