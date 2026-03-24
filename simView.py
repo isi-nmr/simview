@@ -151,6 +151,10 @@ class GUIapp(
         self.resetTrajectoryZeroAction.triggered.connect(self.reset_trajectory_zero)
         viewMenu.addAction(self.resetTrajectoryZeroAction)
 
+        self.jumpToPpgLineAction = QtGui.QAction("Jump To PPG Line...", self)
+        self.jumpToPpgLineAction.triggered.connect(self.jump_to_ppg_line)
+        viewMenu.addAction(self.jumpToPpgLineAction)
+
         shortcutsHelpAction = QtGui.QAction("Shortcuts", self)
         shortcutsHelpAction.setShortcut(QtGui.QKeySequence(Qt.Key.Key_F1))
         shortcutsHelpAction.triggered.connect(self.showShortcutsHelp)

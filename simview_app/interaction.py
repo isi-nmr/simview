@@ -90,6 +90,7 @@ class InteractionMixin:
         QtGui.QShortcut(QtGui.QKeySequence("Z"), self, activated=self.zoomModeButton.toggle)
         QtGui.QShortcut(QtGui.QKeySequence("E"), self, activated=self.snapMeasureAction.toggle)
         QtGui.QShortcut(QtGui.QKeySequence("T"), self, activated=self.zeroTrajectoryAtCursorAction.trigger)
+        QtGui.QShortcut(QtGui.QKeySequence("J"), self, activated=self.jumpToPpgLineAction.trigger)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Left), self, activated=self.jumpXNeg)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Right), self, activated=self.jumpXPos)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_F1), self, activated=self.showShortcutsHelp)
@@ -363,6 +364,97 @@ class InteractionMixin:
         if source_name is not None:
             return f"{source_name} (ln {line_number})"
         return f"ln {line_number}"
+
+    def get_pulse_program_line_number(self, cursor_time: float | None) -> int | None:
+        if cursor_time is None:
+            return None
+
+        timeline = getattr(self, "pulseProgramTimeline", None)
+        if timeline is None or not isinstance(timeline, tuple) or len(timeline) != 2:
+            return None
+
+        times, line_numbers = timeline
+        if times is None or line_numbers is None:
+            return None
+        if len(times) == 0 or len(line_numbers) == 0:
+            return None
+
+        index = int(np.searchsorted(times, cursor_time, side="right") - 1)
+        if index < 0:
+            return None
+        return int(line_numbers[min(index, len(line_numbers) - 1)])
+
+    def get_pulse_program_jump_targets(self) -> list[tuple[str, float, int]]:
+        timeline = getattr(self, "pulseProgramTimeline", None)
+        if timeline is None or not isinstance(timeline, tuple) or len(timeline) != 2:
+            return []
+        times, line_numbers = timeline
+        if times is None or line_numbers is None:
+            return []
+        if len(times) == 0 or len(line_numbers) == 0:
+            return []
+
+        mapping = getattr(self, "pulseProgramLineMapping", {})
+        seen_lines: set[int] = set()
+        targets: list[tuple[str, float, int]] = []
+        for time_value, line_number_value in zip(times, line_numbers, strict=False):
+            line_number = int(line_number_value)
+            if line_number in seen_lines:
+                continue
+            seen_lines.add(line_number)
+            mapped = mapping.get(line_number, {})
+            source_name = mapped.get("source")
+            source_line = mapped.get("line")
+            if source_name is not None and source_line is not None:
+                location_text = f"{source_name}:{source_line} (ln {line_number})"
+            elif source_name is not None:
+                location_text = f"{source_name} (ln {line_number})"
+            else:
+                location_text = f"ln {line_number}"
+
+            target_time = float(time_value)
+            label = f"{location_text} @ {self.format_time(target_time)}"
+            targets.append((label, target_time, line_number))
+        return targets
+
+    def jump_to_pulse_program_time(self, target_time: float) -> None:
+        if not self.plots:
+            return
+        self.tPos = float(target_time)
+        self.updateView()
+        for plot in self.plots:
+            plot.cursor_line.setPos(self.tPos)
+        self.update_status(cursor_time=self.tPos)
+
+    def jump_to_ppg_line(self) -> None:
+        targets = self.get_pulse_program_jump_targets()
+        if not targets:
+            dialog.showErrorMessage("No pulse-program line mapping is available for this dataset.")
+            return
+
+        current_line_number = self.get_pulse_program_line_number(self.currentCursorTime)
+        current_index = 0
+        if current_line_number is not None:
+            for idx, (_label, _time_value, line_number) in enumerate(targets):
+                if line_number == current_line_number:
+                    current_index = idx
+                    break
+
+        labels = [item[0] for item in targets]
+        selected_label, accepted = QtWidgets.QInputDialog.getItem(
+            self,
+            "Jump To PPG Line",
+            "Pulse program location:",
+            labels,
+            current_index,
+            False,
+        )
+        if not accepted:
+            return
+
+        selected_index = labels.index(selected_label)
+        _, target_time, _line_number = targets[selected_index]
+        self.jump_to_pulse_program_time(target_time)
 
     def update_status(
         self,
