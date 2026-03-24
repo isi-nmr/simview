@@ -45,8 +45,10 @@ class GUIapp(QMainWindow):
         self.currentCursorTime = None
         self.measureSnapToEvents = False
         self.gradientCalibrationHzPerMm = 0.0
+        self.nucleusGammaMHzPerT = PROTON_GAMMA_MHZ_PER_T
         self.displayGradientsInMtPerM = False
         self.trajectoryZeroReferenceTime: float | None = None
+        self.derivedSignalStartupPadding = 1.0
         self.inlineData = data
 
         path = Path(__file__).resolve().parent / "visusimForm.ui"
@@ -166,7 +168,9 @@ class GUIapp(QMainWindow):
         self.snapMeasureAction.setChecked(self.measureSnapToEvents)
 
         self.gradientCalibrationHzPerMm = float(self.settings.value("gradientCalibrationHzPerMm", 0.0, type=float))
+        self.nucleusGammaMHzPerT = float(self.settings.value("nucleusGammaMHzPerT", PROTON_GAMMA_MHZ_PER_T, type=float))
         self.displayGradientsInMtPerM = bool(self.settings.value("displayGradientsInMtPerM", False, type=bool))
+        self.derivedSignalStartupPadding = float(self.settings.value("derivedSignalStartupPadding", 1.0, type=float))
         stored_trajectory_zero = self.settings.value("trajectoryZeroReferenceTime", None)
         self.trajectoryZeroReferenceTime = (
             float(stored_trajectory_zero) if stored_trajectory_zero not in {None, ""} else None
@@ -224,17 +228,37 @@ class GUIapp(QMainWindow):
         self.gradientCalibrationSpinBox.setSingleStep(1.0)
         self.gradientCalibrationSpinBox.setSuffix(" Hz/mm @ 100%")
         self.gradientCalibrationSpinBox.setValue(self.gradientCalibrationHzPerMm)
+        self.nucleusGammaSpinBox = QtWidgets.QDoubleSpinBox()
+        self.nucleusGammaSpinBox.setDecimals(6)
+        self.nucleusGammaSpinBox.setRange(0.001, 1_000.0)
+        self.nucleusGammaSpinBox.setSingleStep(0.1)
+        self.nucleusGammaSpinBox.setSuffix(" MHz/T")
+        self.nucleusGammaSpinBox.setValue(self.nucleusGammaMHzPerT)
+        self.maxGradientStrengthValue = QtWidgets.QLineEdit()
+        self.maxGradientStrengthValue.setReadOnly(True)
+        self.derivedSignalStartupPaddingSpinBox = QtWidgets.QDoubleSpinBox()
+        self.derivedSignalStartupPaddingSpinBox.setDecimals(3)
+        self.derivedSignalStartupPaddingSpinBox.setRange(0.0, 10_000.0)
+        self.derivedSignalStartupPaddingSpinBox.setSingleStep(0.1)
+        self.derivedSignalStartupPaddingSpinBox.setSuffix(" s")
+        self.derivedSignalStartupPaddingSpinBox.setValue(self.derivedSignalStartupPadding)
         self.displayGradientsInMtPerMCheckBox = QtWidgets.QCheckBox("Display physical gradients in mT/m")
         self.displayGradientsInMtPerMCheckBox.setChecked(self.displayGradientsInMtPerM)
         self.applyScannerSettingsButton = QtWidgets.QPushButton("Apply Scanner Settings")
         self.applyScannerSettingsButton.clicked.connect(self.apply_scanner_settings)
         self.settingsFormLayout = QtWidgets.QFormLayout()
         self.settingsFormLayout.addRow("Grad Calibration", self.gradientCalibrationSpinBox)
+        self.settingsFormLayout.addRow("Nucleus Gamma", self.nucleusGammaSpinBox)
+        self.settingsFormLayout.addRow("Max Grad @ 100%", self.maxGradientStrengthValue)
+        self.settingsFormLayout.addRow("Startup Padding", self.derivedSignalStartupPaddingSpinBox)
         self.settingsLayout.addWidget(self.scannerSettingsHint)
         self.settingsLayout.addLayout(self.settingsFormLayout)
         self.settingsLayout.addWidget(self.displayGradientsInMtPerMCheckBox)
         self.settingsLayout.addWidget(self.applyScannerSettingsButton)
         self.settingsLayout.addStretch(1)
+        self.gradientCalibrationSpinBox.valueChanged.connect(self.update_scanner_settings_display)
+        self.nucleusGammaSpinBox.valueChanged.connect(self.update_scanner_settings_display)
+        self.update_scanner_settings_display()
 
         self.sideTabs.addTab(self.channelsTab, "Channels")
         self.sideTabs.addTab(self.settingsTab, "Settings")
@@ -385,12 +409,29 @@ class GUIapp(QMainWindow):
             return label, None
         return label, units
 
+    def calculate_max_gradient_strength_mt_per_m(self, calibration_hz_per_mm: float, gamma_mhz_per_t: float) -> float | None:
+        if calibration_hz_per_mm <= 0 or gamma_mhz_per_t <= 0:
+            return None
+        return calibration_hz_per_mm / gamma_mhz_per_t
+
+    def update_scanner_settings_display(self) -> None:
+        max_gradient_mt_per_m = self.calculate_max_gradient_strength_mt_per_m(
+            float(self.gradientCalibrationSpinBox.value()),
+            float(self.nucleusGammaSpinBox.value()),
+        )
+        if max_gradient_mt_per_m is None:
+            self.maxGradientStrengthValue.setText("-")
+        else:
+            self.maxGradientStrengthValue.setText(f"{max_gradient_mt_per_m:.6f} mT/m")
+
     def is_percent_gradient_units(self, units: str | None) -> bool:
         normalized = (units or "").strip().lower()
         return normalized in {"", "%", "percent", "pct"}
 
     def hz_per_mm_to_mt_per_m(self, data: np.ndarray) -> np.ndarray:
-        return np.asarray(data, dtype=float) / PROTON_GAMMA_MHZ_PER_T
+        if self.nucleusGammaMHzPerT <= 0:
+            return np.zeros_like(np.asarray(data, dtype=float))
+        return np.asarray(data, dtype=float) / self.nucleusGammaMHzPerT
 
     def hz_per_mm_to_t_per_m(self, data: np.ndarray) -> np.ndarray:
         return self.hz_per_mm_to_mt_per_m(data) * 1e-3
@@ -455,9 +496,14 @@ class GUIapp(QMainWindow):
 
     def apply_scanner_settings(self) -> None:
         self.gradientCalibrationHzPerMm = float(self.gradientCalibrationSpinBox.value())
+        self.nucleusGammaMHzPerT = float(self.nucleusGammaSpinBox.value())
         self.displayGradientsInMtPerM = self.displayGradientsInMtPerMCheckBox.isChecked()
+        self.derivedSignalStartupPadding = float(self.derivedSignalStartupPaddingSpinBox.value())
         self.settings.setValue("gradientCalibrationHzPerMm", self.gradientCalibrationHzPerMm)
+        self.settings.setValue("nucleusGammaMHzPerT", self.nucleusGammaMHzPerT)
         self.settings.setValue("displayGradientsInMtPerM", self.displayGradientsInMtPerM)
+        self.settings.setValue("derivedSignalStartupPadding", self.derivedSignalStartupPadding)
+        self.update_scanner_settings_display()
         if self.channels:
             self.selectedChannels = [check_box.text() for check_box in self.checkBoxes if check_box.isChecked()]
             self.reload_current_data()
@@ -519,6 +565,24 @@ class GUIapp(QMainWindow):
         interval_area = 0.5 * (norm_data[:-1] + norm_data[1:]) * np.diff(norm_time)
         trajectory[1:] = np.cumsum(interval_area)
         return trajectory
+
+    def compute_gradient_duty_cycle(self, time: np.ndarray, data: np.ndarray) -> np.ndarray:
+        norm_time, norm_data = self.normalize_time_series(time, data)
+        duty_cycle = np.zeros_like(norm_data, dtype=float)
+        if norm_time.size < 2 or norm_data.size < 2:
+            return duty_cycle
+
+        fake_interval = max(float(self.derivedSignalStartupPadding), 0.0)
+        duty_time = np.concatenate(([norm_time[0] - fake_interval], norm_time))
+        duty_data = np.concatenate(([0.0], norm_data))
+
+        dt = np.diff(duty_time)
+        active_intervals = (np.abs(duty_data[:-1]) > 1e-12) * dt
+        cumulative_active = np.concatenate(([0.0], np.cumsum(active_intervals)))
+        elapsed = norm_time - duty_time[0]
+        valid = elapsed > 0
+        duty_cycle[valid] = 100.0 * cumulative_active[1:][valid] / elapsed[valid]
+        return duty_cycle
 
     def zero_trajectory_to_reference(self, time: np.ndarray, trajectory: np.ndarray) -> np.ndarray:
         if self.trajectoryZeroReferenceTime is None or time.size == 0 or trajectory.size == 0:
@@ -605,9 +669,15 @@ class GUIapp(QMainWindow):
                 energy[1:] = np.cumsum(output_power[:-1] * np.diff(merged_time))
 
             average_power = np.zeros_like(output_power, dtype=float)
-            elapsed = merged_time - merged_time[0]
+            average_padding = max(float(self.derivedSignalStartupPadding), 0.0)
+            average_time = np.concatenate(([merged_time[0] - average_padding], merged_time))
+            average_power_profile = np.concatenate(([0.0], output_power))
+            average_energy = np.zeros_like(average_time, dtype=float)
+            if average_time.size > 1:
+                average_energy[1:] = np.cumsum(average_power_profile[:-1] * np.diff(average_time))
+            elapsed = merged_time - average_time[0]
             valid = elapsed > 0
-            average_power[valid] = energy[valid] / elapsed[valid]
+            average_power[valid] = average_energy[1:][valid] / elapsed[valid]
 
             derived_channels.append(
                 [
@@ -705,6 +775,7 @@ class GUIapp(QMainWindow):
 
         slew_channel: list[dict] = []
         trajectory_channel: list[dict] = []
+        duty_cycle_channel: list[dict] = []
 
         for axis in ("x", "y", "z"):
             if axis not in gradient_axes:
@@ -741,6 +812,8 @@ class GUIapp(QMainWindow):
                 traj_units = f"{display_units}*s" if display_units else "a.u.*s"
 
             traj_data = self.zero_trajectory_to_reference(traj_time, traj_data)
+            duty_cycle_time, duty_cycle_source = self.normalize_time_series(time, display_data)
+            duty_cycle_data = self.compute_gradient_duty_cycle(duty_cycle_time, duty_cycle_source)
 
             slew_channel.append(
                 {
@@ -777,11 +850,30 @@ class GUIapp(QMainWindow):
                     "show": False,
                 },
             )
+            duty_cycle_channel.append(
+                {
+                    "chanLabel": "Gradient Duty Cycle",
+                    "label": f"D{axis}",
+                    "type": "grads_derived",
+                    "ind": source_line.get("ind", axis),
+                    "key": f"D{axis}",
+                    "plotType": "mag",
+                    "units": "%",
+                    "t": duty_cycle_time,
+                    "data": duty_cycle_data,
+                    "annotations": [],
+                    "pen": pen,
+                    "drawStyle": "step",
+                    "show": False,
+                },
+            )
 
         if slew_channel:
             derived_channels.append(slew_channel)
         if trajectory_channel:
             derived_channels.append(trajectory_channel)
+        if duty_cycle_channel:
+            derived_channels.append(duty_cycle_channel)
 
         return derived_channels
 
