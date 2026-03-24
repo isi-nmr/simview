@@ -55,8 +55,10 @@ def readNMRScopeBChannels(path_data:str|dict,progress:QProgressDialog,app:QMainW
             "key": channelName,
             "plotType": plotType,
             "units": new_data[channelName]["units"],
+            "raw_units": new_data[channelName]["units"],
             "t": time,
             "data":dataNpy,
+            "raw_data": dataNpy.copy(),
             "show": new_data[channelName]["show"]=="yes"
         }
         channelDes["annotations"] = []

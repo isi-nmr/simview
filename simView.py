@@ -21,6 +21,7 @@ from utils.simUtilsNMRScopeB import readNMRScopeBChannels
 from widgets.mulitPlotCursor import CursorPlot
 
 _UNSET = object()
+PROTON_GAMMA_MHZ_PER_T = 42.57638474
 
 
 class GUIapp(QMainWindow):
@@ -43,6 +44,9 @@ class GUIapp(QMainWindow):
         self.currentMeasurement = None
         self.currentCursorTime = None
         self.measureSnapToEvents = False
+        self.gradientCalibrationHzPerMm = 0.0
+        self.displayGradientsInMtPerM = False
+        self.inlineData = data
 
         path = Path(__file__).resolve().parent / "visusimForm.ui"
         uic.loadUi(path, self)
@@ -152,15 +156,22 @@ class GUIapp(QMainWindow):
         self.measureSnapToEvents = bool(self.settings.value("measureSnapToEvents", False, type=bool))
         self.snapMeasureAction.setChecked(self.measureSnapToEvents)
 
+        self.gradientCalibrationHzPerMm = float(self.settings.value("gradientCalibrationHzPerMm", 0.0, type=float))
+        self.displayGradientsInMtPerM = bool(self.settings.value("displayGradientsInMtPerM", False, type=bool))
+
         self.selectedChannels = self.settings.value("selectedChannels", [])
         if not isinstance(self.selectedChannels, list):
             self.selectedChannels = [self.selectedChannels] if self.selectedChannels else []
 
         self.sidePanel = QtWidgets.QWidget()
         self.sidePanel.setMinimumWidth(180)
-        self.sidePanel.setMaximumWidth(240)
+        self.sidePanel.setMaximumWidth(320)
         self.sidePanel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        self.leftMenu = QVBoxLayout(self.sidePanel)
+        self.sidePanelLayout = QVBoxLayout(self.sidePanel)
+        self.sideTabs = QtWidgets.QTabWidget()
+
+        self.channelsTab = QtWidgets.QWidget()
+        self.channelsLayout = QVBoxLayout(self.channelsTab)
 
         self.channelFilter = QtWidgets.QLineEdit()
         self.channelFilter.setPlaceholderText("Filter channels...")
@@ -184,9 +195,37 @@ class GUIapp(QMainWindow):
         self.channelScrollArea.setWidgetResizable(True)
         self.channelScrollArea.setWidget(self.channelListWidget)
 
-        self.leftMenu.addWidget(self.channelFilter)
-        self.leftMenu.addLayout(self.channelButtonLayout)
-        self.leftMenu.addWidget(self.channelScrollArea)
+        self.channelsLayout.addWidget(self.channelFilter)
+        self.channelsLayout.addLayout(self.channelButtonLayout)
+        self.channelsLayout.addWidget(self.channelScrollArea)
+
+        self.settingsTab = QtWidgets.QWidget()
+        self.settingsLayout = QVBoxLayout(self.settingsTab)
+        self.scannerSettingsHint = QtWidgets.QLabel(
+            "Gradient channels are loaded in percent. Enter the scanner calibration at 100% to scale them to Hz/mm."
+        )
+        self.scannerSettingsHint.setWordWrap(True)
+        self.gradientCalibrationSpinBox = QtWidgets.QDoubleSpinBox()
+        self.gradientCalibrationSpinBox.setDecimals(3)
+        self.gradientCalibrationSpinBox.setRange(0.0, 1_000_000.0)
+        self.gradientCalibrationSpinBox.setSingleStep(1.0)
+        self.gradientCalibrationSpinBox.setSuffix(" Hz/mm @ 100%")
+        self.gradientCalibrationSpinBox.setValue(self.gradientCalibrationHzPerMm)
+        self.displayGradientsInMtPerMCheckBox = QtWidgets.QCheckBox("Display physical gradients in mT/m")
+        self.displayGradientsInMtPerMCheckBox.setChecked(self.displayGradientsInMtPerM)
+        self.applyScannerSettingsButton = QtWidgets.QPushButton("Apply Scanner Settings")
+        self.applyScannerSettingsButton.clicked.connect(self.apply_scanner_settings)
+        self.settingsFormLayout = QtWidgets.QFormLayout()
+        self.settingsFormLayout.addRow("Grad Calibration", self.gradientCalibrationSpinBox)
+        self.settingsLayout.addWidget(self.scannerSettingsHint)
+        self.settingsLayout.addLayout(self.settingsFormLayout)
+        self.settingsLayout.addWidget(self.displayGradientsInMtPerMCheckBox)
+        self.settingsLayout.addWidget(self.applyScannerSettingsButton)
+        self.settingsLayout.addStretch(1)
+
+        self.sideTabs.addTab(self.channelsTab, "Channels")
+        self.sideTabs.addTab(self.settingsTab, "Settings")
+        self.sidePanelLayout.addWidget(self.sideTabs)
         self.sidePanel.hide()
 
         self.horizontalLayout_2.insertWidget(0, self.sidePanel)
@@ -308,6 +347,242 @@ class GUIapp(QMainWindow):
     def sanitize_filename(self, value: str) -> str:
         sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip()).strip("._")
         return sanitized or "plot"
+
+    def get_channel_axis_label(self, channel: list[dict]) -> tuple[str, str | None]:
+        label = str(channel[0].get("chanLabel", ""))
+        units = str(channel[0].get("units", "")).strip() or None
+        if "(" in label and ")" in label:
+            return label, None
+        return label, units
+
+    def is_percent_gradient_units(self, units: str | None) -> bool:
+        normalized = (units or "").strip().lower()
+        return normalized in {"", "%", "percent", "pct"}
+
+    def hz_per_mm_to_mt_per_m(self, data: np.ndarray) -> np.ndarray:
+        return np.asarray(data, dtype=float) / PROTON_GAMMA_MHZ_PER_T
+
+    def hz_per_mm_to_t_per_m(self, data: np.ndarray) -> np.ndarray:
+        return self.hz_per_mm_to_mt_per_m(data) * 1e-3
+
+    def get_gradient_display_units(self, raw_units: str | None) -> str:
+        if self.gradientCalibrationHzPerMm > 0 and self.is_percent_gradient_units(raw_units):
+            if self.displayGradientsInMtPerM:
+                return "mT/m"
+            return "Hz/mm"
+        return (raw_units or "").strip() or "%"
+
+    def scale_gradient_data(self, data: np.ndarray, raw_units: str | None) -> np.ndarray:
+        scaled = np.asarray(data, dtype=float)
+        if self.gradientCalibrationHzPerMm > 0 and self.is_percent_gradient_units(raw_units):
+            scaled_hz_per_mm = scaled * (self.gradientCalibrationHzPerMm / 100.0)
+            if self.displayGradientsInMtPerM:
+                return self.hz_per_mm_to_mt_per_m(scaled_hz_per_mm)
+            return scaled_hz_per_mm
+        return scaled
+
+    def get_gradient_physical_hz_per_mm(self, line: dict) -> np.ndarray | None:
+        if self.gradientCalibrationHzPerMm <= 0:
+            return None
+
+        raw_units = str(line.get("raw_units", line.get("units", "%")))
+        if not self.is_percent_gradient_units(raw_units):
+            return None
+
+        raw_data = np.asarray(line.get("raw_data", line.get("data", [])), dtype=float)
+        return raw_data * (self.gradientCalibrationHzPerMm / 100.0)
+
+    def update_gradient_channels(self) -> None:
+        for channel in self.channels:
+            for line in channel:
+                if line.get("type") != "grads":
+                    continue
+                raw_data = np.asarray(line.get("raw_data", line.get("data", [])), dtype=float)
+                raw_units = str(line.get("raw_units", line.get("units", "%")))
+                line["raw_data"] = raw_data
+                line["raw_units"] = raw_units
+                line["physical_hz_per_mm"] = self.get_gradient_physical_hz_per_mm(line)
+                line["data"] = self.scale_gradient_data(raw_data, raw_units)
+                line["units"] = self.get_gradient_display_units(raw_units)
+
+    def rebuild_loaded_channels(self) -> None:
+        if not self.channels:
+            return
+        self.channels = [channel for channel in self.channels if channel[0].get("type") != "grads_derived"]
+        self.update_gradient_channels()
+        self.channels.extend(self.build_gradient_derived_channels())
+
+    def reload_current_data(self) -> None:
+        if self.dataPath is not None:
+            self.loadData()
+        elif self.inlineData is not None:
+            self.loadData(self.inlineData)
+
+    def apply_scanner_settings(self) -> None:
+        self.gradientCalibrationHzPerMm = float(self.gradientCalibrationSpinBox.value())
+        self.displayGradientsInMtPerM = self.displayGradientsInMtPerMCheckBox.isChecked()
+        self.settings.setValue("gradientCalibrationHzPerMm", self.gradientCalibrationHzPerMm)
+        self.settings.setValue("displayGradientsInMtPerM", self.displayGradientsInMtPerM)
+        if self.channels:
+            self.selectedChannels = [check_box.text() for check_box in self.checkBoxes if check_box.isChecked()]
+            self.reload_current_data()
+        self.update_status()
+
+    def classify_gradient_axis(self, line: dict) -> str | None:
+        for candidate in (
+            str(line.get("key", "")),
+            str(line.get("label", "")),
+            str(line.get("chanLabel", "")),
+        ):
+            normalized = re.sub(r"[^a-z0-9]", "", candidate.lower())
+            if normalized in {"gx", "g1", "gradx", "gradientx"}:
+                return "x"
+            if normalized in {"gy", "g2", "grady", "gradienty"}:
+                return "y"
+            if normalized in {"gz", "g3", "gradz", "gradientz"}:
+                return "z"
+        return None
+
+    def normalize_time_series(self, time: np.ndarray, data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        time_array = np.asarray(time, dtype=float)
+        data_array = np.asarray(data, dtype=float)
+
+        if time_array.size <= 1:
+            return time_array, data_array
+
+        keep_indices = [0]
+        for index in range(1, time_array.size):
+            current_time = float(time_array[index])
+            last_kept_index = keep_indices[-1]
+            last_time = float(time_array[last_kept_index])
+
+            if current_time > last_time:
+                keep_indices.append(index)
+            else:
+                keep_indices[-1] = index
+
+        keep_array = np.asarray(keep_indices, dtype=int)
+        return time_array[keep_array], data_array[keep_array]
+
+    def compute_gradient_slew_rate_profile(self, time: np.ndarray, data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        norm_time, norm_data = self.normalize_time_series(time, data)
+        if norm_time.size < 2 or norm_data.size < 2:
+            return norm_time, np.zeros_like(norm_time, dtype=float)
+
+        interval_slew = np.diff(norm_data) / np.diff(norm_time)
+        slew_data = np.empty_like(norm_time, dtype=float)
+        slew_data[:-1] = interval_slew
+        slew_data[-1] = interval_slew[-1]
+        return norm_time, slew_data
+
+    def compute_gradient_trajectory(self, time: np.ndarray, data: np.ndarray) -> np.ndarray:
+        norm_time, norm_data = self.normalize_time_series(time, data)
+        trajectory = np.zeros_like(norm_data, dtype=float)
+        if norm_time.size < 2 or norm_data.size < 2:
+            return trajectory
+
+        interval_area = 0.5 * (norm_data[:-1] + norm_data[1:]) * np.diff(norm_time)
+        trajectory[1:] = np.cumsum(interval_area)
+        return trajectory
+
+    def build_gradient_derived_channels(self) -> list[list[dict]]:
+        gradient_axes: dict[str, dict] = {}
+        for channel in self.channels:
+            for line in channel:
+                if line.get("type") != "grads":
+                    continue
+                axis = self.classify_gradient_axis(line)
+                if axis is not None and axis not in gradient_axes:
+                    gradient_axes[axis] = line
+
+        if not gradient_axes:
+            return []
+
+        derived_channels: list[list[dict]] = []
+        axis_meta = {
+            "x": ("Gx", "g"),
+            "y": ("Gy", "r"),
+            "z": ("Gz", "b"),
+        }
+
+        slew_channel: list[dict] = []
+        trajectory_channel: list[dict] = []
+
+        for axis in ("x", "y", "z"):
+            if axis not in gradient_axes:
+                continue
+
+            source_line = gradient_axes[axis]
+            _, pen = axis_meta[axis]
+            time = np.asarray(source_line["t"], dtype=float)
+            display_data = np.asarray(source_line["data"], dtype=float)
+            display_units = str(source_line.get("units", "")).strip()
+            physical_hz_per_mm = source_line.get("physical_hz_per_mm")
+
+            if physical_hz_per_mm is not None:
+                physical_hz_per_mm = np.asarray(physical_hz_per_mm, dtype=float)
+                _, slew_hz_per_mm = self.compute_gradient_slew_rate_profile(time, physical_hz_per_mm)
+                if self.displayGradientsInMtPerM:
+                    slew_time, _ = self.normalize_time_series(time, physical_hz_per_mm)
+                    slew_data = self.hz_per_mm_to_t_per_m(slew_hz_per_mm)
+                    slew_units = "T/m/s"
+                else:
+                    slew_time, _ = self.normalize_time_series(time, physical_hz_per_mm)
+                    slew_data = slew_hz_per_mm
+                    slew_units = "Hz/mm/s"
+
+                traj_time, traj_source = self.normalize_time_series(time, physical_hz_per_mm)
+                traj_data = self.compute_gradient_trajectory(traj_time, traj_source)
+                traj_units = "cycles/mm"
+            else:
+                time, data = self.normalize_time_series(time, display_data)
+                slew_time, slew_data = self.compute_gradient_slew_rate_profile(time, data)
+                slew_units = f"{display_units}/s" if display_units else "a.u./s"
+                traj_time = time
+                traj_data = self.compute_gradient_trajectory(time, data)
+                traj_units = f"{display_units}*s" if display_units else "a.u.*s"
+
+            slew_channel.append(
+                {
+                    "chanLabel": "Gradient Slew Rate",
+                    "label": f"S{axis}",
+                    "type": "grads_derived",
+                    "ind": source_line.get("ind", axis),
+                    "key": f"S{axis}",
+                    "plotType": "mag",
+                    "units": slew_units,
+                    "t": slew_time,
+                    "data": slew_data,
+                    "annotations": [],
+                    "pen": pen,
+                    "drawStyle": "step",
+                    "show": False,
+                },
+            )
+            trajectory_channel.append(
+                {
+                    "chanLabel": "Gradient Trajectory",
+                    "label": f"T{axis}",
+                    "type": "grads_derived",
+                    "ind": source_line.get("ind", axis),
+                    "key": f"T{axis}",
+                    "plotType": "mag",
+                    "units": traj_units,
+                    "t": traj_time,
+                    "data": traj_data,
+                    "annotations": [],
+                    "pen": pen,
+                    "drawStyle": "line",
+                    "show": False,
+                },
+            )
+
+        if slew_channel:
+            derived_channels.append(slew_channel)
+        if trajectory_channel:
+            derived_channels.append(trajectory_channel)
+
+        return derived_channels
 
     def slice_curve_to_range(
         self,
@@ -757,6 +1032,8 @@ class GUIapp(QMainWindow):
 
     def loadData(self, data: str | None = None) -> None:
         self.resetApp()
+        if data is not None:
+            self.inlineData = data
 
         progress = QtWidgets.QProgressDialog("Parsing simulation data ...", "Cancel", 0, 100, self)
         progress.setWindowTitle("Please Wait")
@@ -773,6 +1050,9 @@ class GUIapp(QMainWindow):
                 self.channels = readBrkrChannels(self.dataPath, progress, self)
         else:
             self.channels = readNMRScopeBChannels(data, progress, self)
+
+        self.update_gradient_channels()
+        self.channels.extend(self.build_gradient_derived_channels())
 
         if not self.channels:
             self.sidePanel.hide()
@@ -892,7 +1172,8 @@ class GUIapp(QMainWindow):
             if len(channel) > 1:
                 currentPlot.addLegend(offset=(10, 10))
 
-            currentPlot.setLabel("right", channel[0]["chanLabel"])
+            axis_label, axis_units = self.get_channel_axis_label(channel)
+            currentPlot.setLabel("right", axis_label, units=axis_units)
 
             if np.sum(np.abs(channel[0]["data"])) == 0:
                 phaseContainer.hide()
@@ -913,13 +1194,13 @@ class GUIapp(QMainWindow):
                     self.checkBoxes[chanInd].blockSignals(False)  # noqa: FBT003
 
             for _, line in enumerate(channel):
-                stepData = multiplot.convertToStep(line, "data")
+                plot_data = line if line.get("drawStyle") == "line" else multiplot.convertToStep(line, "data")
                 currentPen = line.get("pen", pens[chanInd % len(pens)])
 
                 if type(currentPen) is str:
                     currentPen = penDict[currentPen]
 
-                currentPlot.add_managed_curve(stepData["t"], stepData["data"], name=line["label"], pen=currentPen)
+                currentPlot.add_managed_curve(plot_data["t"], plot_data["data"], name=line["label"], pen=currentPen)
 
                 if len(line["annotations"]) > 0:
                     multiplot.addAnnotations(line, currentPlot)
