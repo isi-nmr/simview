@@ -1,6 +1,5 @@
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
 
 from widgets.mulitPlotCursor import CursorPlot
 
@@ -29,20 +28,11 @@ def makePens()->tuple[list, dict]:
 def addAnnotations(line:dict, currentPlot: CursorPlot)->None:
     for annotation in line["annotations"]:
         for ind, t in enumerate(annotation["t"]):
-            _line = pg.InfiniteLine(
-                pos=t,
-                angle=90,
-                pen=pg.mkPen("r", style=Qt.PenStyle.DashLine),
-            )
-            currentPlot.addItem(_line)
-
-            text = pg.TextItem(
+            currentPlot.add_annotation_marker(
+                float(t),
                 f"f = {annotation['vals'][ind]:.2f} {annotation['units']}",
-                anchor=(0, 0),
                 color="r",
             )
-            text.setPos(t, 110)  # adjust vertical offset if needed
-            currentPlot.addItem(text)
 
 def makeStepArrs(tArr:np.ndarray, multArr:np.ndarray)->np.ndarray:
     stepTime = np.repeat(tArr, 2)[1:]

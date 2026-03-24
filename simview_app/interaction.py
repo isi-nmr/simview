@@ -44,7 +44,10 @@ class InteractionMixin:
             "<b>Move mouse</b> Inspect synced cursor across plots<br>"
             "<b>Measure mode</b> Click once to start, click again to finish<br>"
             "<b>Zoom mode</b> Click-drag to zoom into a region<br>"
-            "<b>Shift + drag</b> Temporary zoom without switching modes"
+            "<b>Shift + drag</b> Temporary zoom without switching modes<br>"
+            "<b>Mouse wheel</b> Horizontal zoom around cursor<br>"
+            "<b>Shift + wheel</b> Horizontal pan<br>"
+            "<b>Double click</b> Reset horizontal view"
         )
 
         QtWidgets.QMessageBox.information(self, "SimView Shortcuts", help_text)
@@ -185,6 +188,29 @@ class InteractionMixin:
         self.windowWidth = min(self.tMax - self.tMin, self.windowWidth / 0.8)
         self.updateView()
 
+    def zoom_to_cursor(self, cursor_time: float, zoom_factor: float) -> None:
+        if self.tMax <= self.tMin:
+            return
+
+        old_width = self.windowWidth
+        min_width = max((self.tMax - self.tMin) / self.tSlider.maximum(), self.sliderScaler)
+        self.windowWidth = min(max(old_width * zoom_factor, min_width), self.tMax - self.tMin)
+
+        if old_width <= 0:
+            self.updateView()
+            return
+
+        relative_position = (cursor_time - (self.tPos - old_width * 0.5)) / old_width
+        relative_position = min(max(relative_position, 0.0), 1.0)
+        self.tPos = cursor_time - (relative_position - 0.5) * self.windowWidth
+        self.updateView()
+
+    def pan_horizontally(self, delta_time: float) -> None:
+        if delta_time == 0:
+            return
+        self.tPos += delta_time
+        self.updateView()
+
     def changeXRange(self) -> None:
         self.tPos = self.tSlider.value() * self.sliderScaler
         self.updateView()
@@ -207,7 +233,7 @@ class InteractionMixin:
         rangeNeg = self.tPos - half_width
 
         for plot in self.plots:
-            plot.setXRange(rangeNeg, rangePos)
+            plot.setXRange(rangeNeg, rangePos, padding=0)
 
         block_signals = True
         unblock_signals = False

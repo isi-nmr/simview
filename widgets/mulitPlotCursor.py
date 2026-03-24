@@ -1,7 +1,7 @@
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QPointF, Qt, QTimer
-from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QResizeEvent, QShowEvent
+from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QResizeEvent, QShowEvent, QWheelEvent
 from PyQt6.QtWidgets import QApplication
 
 
@@ -31,6 +31,7 @@ class CursorPlot(pg.PlotWidget):
         self._last_refresh_key: tuple[float, float, float, float, int, int] | None = None
         self._resize_in_progress = False
         self._refresh_in_progress = False
+        self.annotation_items: list[dict[str, object]] = []
         super().__init__(*args, **kwargs)
 
         # Create the vertical line cursor
@@ -58,6 +59,8 @@ class CursorPlot(pg.PlotWidget):
         self._refresh_timer.timeout.connect(self._handle_refresh_timeout)
         self.getViewBox().sigXRangeChanged.connect(self.schedule_curve_refresh)
         self.getViewBox().sigYRangeChanged.connect(self.schedule_curve_refresh)
+        self.getViewBox().sigXRangeChanged.connect(self.refresh_annotation_positions)
+        self.getViewBox().sigYRangeChanged.connect(self.refresh_annotation_positions)
 
         self.temp_region = None
         self.temp_text = None
@@ -100,6 +103,61 @@ class CursorPlot(pg.PlotWidget):
 
     def register_curve(self, name: str, x_data: np.ndarray, y_data: np.ndarray) -> None:
         self.curve_cache.append((name, x_data, y_data))
+
+    def add_annotation_marker(self, time_value: float, text_value: str, *, color: str = "r") -> None:
+        annotation_line = pg.InfiniteLine(
+            pos=time_value,
+            angle=90,
+            pen=pg.mkPen(color, style=Qt.PenStyle.DashLine),
+        )
+        self.addItem(annotation_line)
+
+        if self.backgroundBrush().color().lightness() < 128:
+            bg_color = QColor(0, 0, 0, 150)
+        else:
+            bg_color = QColor(255, 255, 255, 220)
+        annotation_text = TextItemWithBg(
+            text_value,
+            anchor=(0, 0),
+            color=color,
+            bg_color=bg_color,
+        )
+        annotation_text.setZValue(95)
+        self.addItem(annotation_text, ignoreBounds=True)
+
+        self.annotation_items.append(
+            {
+                "time": float(time_value),
+                "line": annotation_line,
+                "text": annotation_text,
+            },
+        )
+        self.refresh_annotation_positions()
+
+    def refresh_annotation_positions(self, *args: object) -> None:
+        if not self.annotation_items:
+            return
+
+        x_range, y_range = self.viewRange()
+        x_min, x_max = x_range
+        y_min, y_max = y_range
+        y_span = max(y_max - y_min, 1e-12)
+        base_y = y_max - 0.06 * y_span
+        row_spacing = 0.08 * y_span
+        visible_row = 0
+
+        for annotation in self.annotation_items:
+            time_value = float(annotation["time"])
+            text_item = annotation["text"]
+            if x_min <= time_value <= x_max:
+                text_item.show()
+                text_y = base_y - visible_row * row_spacing
+                if text_y <= y_min:
+                    text_y = y_min + 0.02 * y_span
+                text_item.setPos(time_value, text_y)
+                visible_row += 1
+            else:
+                text_item.hide()
 
     def add_managed_curve(self, x_data: np.ndarray, y_data: np.ndarray, **plot_kwargs: object) -> pg.PlotDataItem:
         x_array = np.asarray(x_data)
@@ -320,6 +378,40 @@ class CursorPlot(pg.PlotWidget):
 
         else:
             super().mousePressEvent(event)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        main_window = self.get_main_window()
+        if main_window is None or not self.dataLoaded:
+            super().wheelEvent(event)
+            return
+
+        angle_delta_y = event.angleDelta().y()
+        angle_delta_x = event.angleDelta().x()
+        if angle_delta_y == 0 and angle_delta_x == 0:
+            super().wheelEvent(event)
+            return
+
+        mouse_point = self.getViewBox().mapSceneToView(event.position())
+        modifiers = QApplication.keyboardModifiers()
+        shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        if shift_pressed:
+            wheel_steps = angle_delta_y if angle_delta_y != 0 else angle_delta_x
+            pan_fraction = -float(wheel_steps) / 1200.0
+            main_window.pan_horizontally(main_window.windowWidth * pan_fraction)
+        else:
+            wheel_steps = angle_delta_y if angle_delta_y != 0 else angle_delta_x
+            zoom_factor = 0.8 if wheel_steps > 0 else 1.25
+            main_window.zoom_to_cursor(float(mouse_point.x()), zoom_factor)
+
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        main_window = self.get_main_window()
+        if main_window is not None and event.button() == Qt.MouseButton.LeftButton:
+            main_window.resetView()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def enable_measure_mode(self,*, enabled:None|bool=None)->None:
         if enabled is None:

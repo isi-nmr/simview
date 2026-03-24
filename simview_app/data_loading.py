@@ -12,6 +12,33 @@ from widgets.mulitPlotCursor import CursorPlot
 
 
 class DataLoadingMixin:
+    def get_initial_y_range(self, channel: list[dict]) -> tuple[float, float] | None:
+        if channel[0]["plotType"] == "phase":
+            if channel[0].get("units", "deg") != "rad":
+                return 0.0, 360.0
+            return -float(np.pi), float(np.pi)
+
+        finite_segments: list[np.ndarray] = []
+        for line in channel:
+            values = np.asarray(line.get("data", []), dtype=float)
+            if values.size == 0:
+                continue
+            finite_values = values[np.isfinite(values)]
+            if finite_values.size > 0:
+                finite_segments.append(finite_values)
+
+        if not finite_segments:
+            return None
+
+        y_min = min(float(np.min(values)) for values in finite_segments)
+        y_max = max(float(np.max(values)) for values in finite_segments)
+        if np.isclose(y_min, y_max):
+            padding = max(abs(y_min) * 0.05, 1.0)
+            return y_min - padding, y_max + padding
+
+        padding = (y_max - y_min) * 0.05
+        return y_min - padding, y_max + padding
+
     def is_zero_channel(self, channel: list[dict]) -> bool:
         for line in channel:
             values = np.asarray(line.get("data", []), dtype=float)
@@ -182,6 +209,8 @@ class DataLoadingMixin:
             phaseContainer_layout.addWidget(currentPlot)
             vb = currentPlot.getViewBox()
             vb.setMouseEnabled(x=False, y=True)
+            vb.enableAutoRange(axis=vb.YAxis, enable=False)
+            vb.setAutoVisible(y=False)
             self.plots.append(currentPlot)
             self.plotContainers.append(phaseContainer)
             self.imageLayout.addWidget(phaseContainer, stretch=1)
@@ -201,11 +230,9 @@ class DataLoadingMixin:
             if chanInd >= len(self.channels) - 1:
                 currentPlot.setLabel("bottom", "Time (s)")
 
-            if channel[0]["plotType"] == "phase":
-                if channel[0].get("units", "deg") != "rad":
-                    currentPlot.setYRange(0, 360)
-                else:
-                    currentPlot.setYRange(-np.pi, np.pi)
+            initial_y_range = self.get_initial_y_range(channel)
+            if initial_y_range is not None:
+                currentPlot.setYRange(*initial_y_range, padding=0)
 
             if len(channel) > 1:
                 currentPlot.addLegend(offset=(10, 10))
