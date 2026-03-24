@@ -43,10 +43,12 @@ class CursorPlot(pg.PlotWidget):
         self.addItem(self.point_label, ignoreBounds=True)
 
         # Connect scene signals
-        self.scene().sigMouseMoved.connect(self.on_mouse_moved)
+        self.mouse_proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=90, slot=self.on_mouse_moved)
         self.scene().installEventFilter(self)  # for enter/leave detection
 
         self.dataLoaded = False
+        self.curve_cache: list[tuple[str, np.ndarray, np.ndarray]] = []
+        self.last_cursor_x: float | None = None
 
         self.temp_region = None
         self.temp_text = None
@@ -86,6 +88,9 @@ class CursorPlot(pg.PlotWidget):
         if self.zoom_region_temp:
             self.removeItem(self.zoom_region_temp)
             self.zoom_region_temp = None
+
+    def register_curve(self, name: str, x_data: np.ndarray, y_data: np.ndarray) -> None:
+        self.curve_cache.append((name, x_data, y_data))
 
     def notify_measurement(self, dt_seconds: float | None = None) -> None:
         main_window = self.get_main_window()
@@ -175,17 +180,8 @@ class CursorPlot(pg.PlotWidget):
             self.removeItem(self.zoom_region_temp)
             self.zoom_region_temp = None
 
-    def get_curves(self)->list:
-        """
-        Returns a list of tuples: (PlotDataItem, x_data, y_data)
-        """
-        curves = []
-        for item in self.plotItem.listDataItems():
-            x, y = item.getData()
-            curves.append((item, x, y))
-        return curves
-
-    def on_mouse_moved(self, pos:QPointF)->None:
+    def on_mouse_moved(self, event: tuple[QPointF]) -> None:
+        pos = event[0]
         if self.zoom_start_x is not None and self.zoom_region_temp is not None:
             mouse_point = self.getViewBox().mapSceneToView(pos)
             x = mouse_point.x()
@@ -198,6 +194,9 @@ class CursorPlot(pg.PlotWidget):
 
         mouse_point = self.getViewBox().mapSceneToView(pos)
         x = mouse_point.x()
+        if self.last_cursor_x is not None and abs(x - self.last_cursor_x) < 1e-12:
+            return
+        self.last_cursor_x = x
         self.cursor_line.setPos(mouse_point.x())
 
         mouse_point = self.plotItem.vb.mapSceneToView(pos)
@@ -206,27 +205,13 @@ class CursorPlot(pg.PlotWidget):
 
         # Loop over all curves to find the nearest point
 
-        yS = []
-        names = []
-        label = ""
-        for _, (curve, cx, cy) in enumerate(self.get_curves()):
-            # Find nearest index
+        label_parts = []
+        for name, cx, cy in self.curve_cache:
+            nearest_idx = max(np.searchsorted(cx, x_val, side="right") - 1, 0)
+            y_value = cy[min(nearest_idx + 1, cy.size - 1)]
+            label_parts.append(f"{name}:{y_value:.2f}")
 
-            mask = cx <= x_val
-            if np.any(mask):  # noqa: SIM108
-                # Pick the last index where cx is less than or equal to x_val
-                nearest_idx = np.where(mask)[0][-1]
-            else:
-                # Fallback: all cx are greater, so pick the first one
-                nearest_idx = 0
-
-            # nearest_idx = np.abs(cx - x_val).argmin()
-            yS.append(cy[np.minimum(nearest_idx + 1, cy.size - 1)])
-            names.append(curve.name() or "Unnamed")
-
-            label += f"{names[-1]}:{yS[-1]:.2f} "
-
-        self.point_label.setText(label)
+        self.point_label.setText(" ".join(label_parts))
         self.point_label.setPos(x_val, y_val)
 
         main_window = self.get_main_window()
@@ -290,6 +275,7 @@ class CursorPlot(pg.PlotWidget):
 
     def leaveEvent(self, event:QMouseEvent)->None:
         """Hide cursor and label when mouse leaves the widget."""
+        self.last_cursor_x = None
         self.cursor_line.hide()
         self.timestamp_label.hide()
         self.point_label.hide()

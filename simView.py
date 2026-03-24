@@ -538,6 +538,7 @@ class GUIapp(QMainWindow):
                     name=line["label"],
                     pen=currentPen,
                 )
+                currentPlot.register_curve(line["label"], stepData["t"], stepData["data"])
 
                 if len(line["annotations"]) > 0:
                     multiplot.addAnnotations(line, currentPlot)
