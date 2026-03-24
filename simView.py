@@ -1399,19 +1399,28 @@ class GUIapp(QMainWindow):
             self.channelListLayout.addWidget(checkBox)
             self.checkBoxes.append(checkBox)
 
-    def checkBoxChanged(self) -> None:
-        for checkBox in self.checkBoxes:
-            if not checkBox.isChecked():
-                if checkBox.text() in self.selectedChannels:
-                    self.selectedChannels.remove(checkBox.text())
-                self.plotContainers[checkBox.contID].hide()
-            else:
-                if checkBox.text() not in self.selectedChannels:
-                    self.selectedChannels.append(checkBox.text())
-                self.plotContainers[checkBox.contID].show()
+    def update_channel_checkbox_state(self, checkBox: QtWidgets.QCheckBox) -> None:
+        if not hasattr(checkBox, "contID"):
+            return
 
+        channel_name = checkBox.text()
+        is_checked = checkBox.isChecked()
+        if is_checked:
+            if channel_name not in self.selectedChannels:
+                self.selectedChannels.append(channel_name)
+        elif channel_name in self.selectedChannels:
+            self.selectedChannels.remove(channel_name)
+
+        container = self.plotContainers[checkBox.contID]
+        container.setVisible(is_checked)
+        if is_checked and checkBox.contID < len(self.plots):
+            self.plots[checkBox.contID].schedule_curve_refresh()
+
+    def checkBoxChanged(self) -> None:
+        check_box = self.sender()
+        if isinstance(check_box, QtWidgets.QCheckBox):
+            self.update_channel_checkbox_state(check_box)
         self.settings.setValue("selectedChannels", self.selectedChannels)
-        self.filterChannels()
         self.update_status()
 
     def filterChannels(self) -> None:
@@ -1421,10 +1430,22 @@ class GUIapp(QMainWindow):
             checkBox.setVisible(matches)
 
     def setAllChannels(self, visible: bool) -> None:
+        changed = False
+        self.sidePanel.setUpdatesEnabled(False)
         for checkBox in self.checkBoxes:
             if not checkBox.isVisible():
                 continue
+            if checkBox.isChecked() == visible:
+                continue
+            checkBox.blockSignals(True)  # noqa: FBT003
             checkBox.setChecked(visible)
+            checkBox.blockSignals(False)  # noqa: FBT003
+            self.update_channel_checkbox_state(checkBox)
+            changed = True
+        self.sidePanel.setUpdatesEnabled(True)
+        if changed:
+            self.settings.setValue("selectedChannels", self.selectedChannels)
+            self.update_status()
 
     def showAllChannels(self) -> None:
         self.setAllChannels(True)

@@ -29,6 +29,7 @@ class CursorPlot(pg.PlotWidget):
         self.managed_curves: list[dict[str, object]] = []
         self.last_cursor_x: float | None = None
         self._last_refresh_key: tuple[float, float, float, float, int, int] | None = None
+        self._resize_in_progress = False
         super().__init__(*args, **kwargs)
 
         # Create the vertical line cursor
@@ -53,7 +54,7 @@ class CursorPlot(pg.PlotWidget):
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
-        self._refresh_timer.timeout.connect(self.refresh_visible_curves)
+        self._refresh_timer.timeout.connect(self._handle_refresh_timeout)
         self.getViewBox().sigXRangeChanged.connect(self.schedule_curve_refresh)
         self.getViewBox().sigYRangeChanged.connect(self.schedule_curve_refresh)
 
@@ -100,17 +101,26 @@ class CursorPlot(pg.PlotWidget):
         self.curve_cache.append((name, x_data, y_data))
 
     def add_managed_curve(self, x_data: np.ndarray, y_data: np.ndarray, **plot_kwargs: object) -> pg.PlotDataItem:
-        plot_curve = self.plot(x_data, y_data, **plot_kwargs)
+        x_array = np.asarray(x_data)
+        y_array = np.asarray(y_data)
+        if x_array.size > 1 and y_array.size > 1:
+            initial_x = x_array[:2]
+            initial_y = y_array[:2]
+        else:
+            initial_x = x_array
+            initial_y = y_array
+
+        plot_curve = self.plot(initial_x, initial_y, **plot_kwargs)
         plot_curve.setClipToView(True)
         plot_curve.setSkipFiniteCheck(True)
 
         curve_name = str(plot_kwargs.get("name", ""))
-        self.register_curve(curve_name, x_data, y_data)
+        self.register_curve(curve_name, x_array, y_array)
         self.managed_curves.append(
             {
                 "item": plot_curve,
-                "x_data": x_data,
-                "y_data": y_data,
+                "x_data": x_array,
+                "y_data": y_array,
             },
         )
         self.schedule_curve_refresh()
@@ -133,10 +143,31 @@ class CursorPlot(pg.PlotWidget):
     def schedule_curve_refresh(self, *args: object) -> None:
         if not self.managed_curves:
             return
+        if not self.isVisible():
+            self._last_refresh_key = None
+            return
+        if self._resize_in_progress:
+            self._refresh_timer.start(120)
+            return
         self._refresh_timer.start(0)
+
+    def schedule_curve_refresh_delayed(self, delay_ms: int) -> None:
+        if not self.managed_curves:
+            return
+        if not self.isVisible():
+            self._last_refresh_key = None
+            return
+        self._refresh_timer.start(max(delay_ms, 0))
+
+    def _handle_refresh_timeout(self) -> None:
+        self._resize_in_progress = False
+        self.refresh_visible_curves()
 
     def refresh_visible_curves(self) -> None:
         if not self.managed_curves:
+            return
+        if not self.isVisible():
+            self._last_refresh_key = None
             return
 
         main_window = self.get_main_window()
@@ -417,9 +448,15 @@ class CursorPlot(pg.PlotWidget):
 
         super().enterEvent(event)
 
-    def resizeEvent(self, event: QResizeEvent) -> None:
+    def showEvent(self, event) -> None:
         self._last_refresh_key = None
         self.schedule_curve_refresh()
+        super().showEvent(event)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        self._last_refresh_key = None
+        self._resize_in_progress = True
+        self.schedule_curve_refresh_delayed(120)
         super().resizeEvent(event)
 
     def showCursor(self)->None:
