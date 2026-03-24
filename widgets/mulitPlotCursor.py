@@ -1,7 +1,8 @@
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QPointF
+from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QColor, QMouseEvent, QPainter
+from PyQt6.QtWidgets import QApplication
 
 
 class TextItemWithBg(pg.TextItem):
@@ -62,14 +63,48 @@ class CursorPlot(pg.PlotWidget):
         self.timestamp_label.hide()
         self.point_label.hide()
 
+    def get_main_window(self):
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, "plots") and hasattr(parent, "update_status"):
+                return parent
+            parent = parent.parent()
+        return None
+
+    def set_interaction_mode(self, mode: str) -> None:
+        self.measure_mode = mode == "measure"
+        self.zoom_mode = mode == "zoom"
+        self.start_x = None
+        self.zoom_start_x = None
+
+        if self.temp_region:
+            self.removeItem(self.temp_region)
+            self.temp_region = None
+        if self.temp_text:
+            self.removeItem(self.temp_text)
+            self.temp_text = None
+        if self.zoom_region_temp:
+            self.removeItem(self.zoom_region_temp)
+            self.zoom_region_temp = None
+
+    def notify_measurement(self, dt_seconds: float | None = None) -> None:
+        main_window = self.get_main_window()
+        if main_window is not None:
+            main_window.update_status(measurement=dt_seconds)
+
     def mousePressEvent(self, event:QMouseEvent)->None:
         mouse_point = self.getViewBox().mapSceneToView(event.position())
+        modifiers = QApplication.keyboardModifiers()
+        shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+
         if self.measure_mode:
             if self.start_x is None:
-                if hasattr(self.parent().parent().parent(), "plots"):
-                    for other in self.parent().parent().parent().plots:
+                main_window = self.get_main_window()
+                if main_window is not None:
+                    for other in main_window.plots:
                         if other == self:
                             continue
+                        other.start_x = None
                         other.measure_mode = False
 
                 # First click → start measuring
@@ -89,27 +124,19 @@ class CursorPlot(pg.PlotWidget):
 
             else:
                 # Second click → finish measurement
+                delta_t = abs(mouse_point.x() - self.start_x)
+                self.notify_measurement(delta_t)
                 self.measure_mode = False
                 self.start_x = None  # reset start for next measurement
-                if hasattr(self.parent().parent().parent(), "plots"):
-                    for other in self.parent().parent().parent().plots:
+                main_window = self.get_main_window()
+                if main_window is not None:
+                    for other in main_window.plots:
                         if other == self:
                             continue
                         other.start_x = None
                         other.measure_mode = False
 
-        elif self.zoom_mode:
-            self.zoom_start_x = mouse_point.x()
-            # create temporary region
-            self.zoom_region_temp = pg.LinearRegionItem(
-                values=(self.zoom_start_x, self.zoom_start_x),
-                movable=False,
-                brush=(100, 100, 100, 50),
-            )
-            self.addItem(self.zoom_region_temp, ignoreBounds=True)
-
-        elif not self.zoom_mode and not self.measure_mode:
-            self.enable_zoom_mode()
+        elif self.zoom_mode or shift_pressed:
             self.zoom_start_x = mouse_point.x()
             # create temporary region
             self.zoom_region_temp = pg.LinearRegionItem(
@@ -159,54 +186,58 @@ class CursorPlot(pg.PlotWidget):
         return curves
 
     def on_mouse_moved(self, pos:QPointF)->None:
-        if self.zoom_mode and self.zoom_start_x is not None:
+        if self.zoom_start_x is not None and self.zoom_region_temp is not None:
             mouse_point = self.getViewBox().mapSceneToView(pos)
             x = mouse_point.x()
             self.zoom_region_temp.setRegion((self.zoom_start_x, x))
             return
 
         """Move the cursor line when mouse moves inside the plot."""
-        if self.sceneBoundingRect().contains(pos):
-            mouse_point = self.getViewBox().mapSceneToView(pos)
-            x = mouse_point.x()
-            self.cursor_line.setPos(mouse_point.x())
+        if not self.sceneBoundingRect().contains(pos):
+            return
 
-            mouse_point = self.plotItem.vb.mapSceneToView(pos)
-            x_val = mouse_point.x()
-            y_val = mouse_point.y()
+        mouse_point = self.getViewBox().mapSceneToView(pos)
+        x = mouse_point.x()
+        self.cursor_line.setPos(mouse_point.x())
 
-            # Loop over all curves to find the nearest point
+        mouse_point = self.plotItem.vb.mapSceneToView(pos)
+        x_val = mouse_point.x()
+        y_val = mouse_point.y()
 
-            yS = []
-            names = []
-            label = ""
-            for _, (curve, cx, cy) in enumerate(self.get_curves()):
-                # Find nearest index
+        # Loop over all curves to find the nearest point
 
-                mask = cx <= x_val
-                if np.any(mask):  # noqa: SIM108
-                    # Pick the last index where cx is less than or equal to x_val
-                    nearest_idx = np.where(mask)[0][-1]
-                else:
-                    # Fallback: all cx are greater, so pick the first one
-                    nearest_idx = 0
+        yS = []
+        names = []
+        label = ""
+        for _, (curve, cx, cy) in enumerate(self.get_curves()):
+            # Find nearest index
 
-                # nearest_idx = np.abs(cx - x_val).argmin()
-                yS.append(cy[np.minimum(nearest_idx + 1, cy.size - 1)])
-                names.append(curve.name() or "Unnamed")
+            mask = cx <= x_val
+            if np.any(mask):  # noqa: SIM108
+                # Pick the last index where cx is less than or equal to x_val
+                nearest_idx = np.where(mask)[0][-1]
+            else:
+                # Fallback: all cx are greater, so pick the first one
+                nearest_idx = 0
 
-                label += f"{names[-1]}:{yS[-1]:.2f} "
+            # nearest_idx = np.abs(cx - x_val).argmin()
+            yS.append(cy[np.minimum(nearest_idx + 1, cy.size - 1)])
+            names.append(curve.name() or "Unnamed")
 
-            self.point_label.setText(label)
-            self.point_label.setPos(x_val, y_val)
+            label += f"{names[-1]}:{yS[-1]:.2f} "
 
-        if hasattr(self.parent().parent().parent(), "plots"):
-            for other in self.parent().parent().parent().plots:
+        self.point_label.setText(label)
+        self.point_label.setPos(x_val, y_val)
+
+        main_window = self.get_main_window()
+        if main_window is not None:
+            for other in main_window.plots:
                 other.cursor_line.setPos(mouse_point.x())
                 # Update timestamp label at bottom-right corner
                 view_rect = other.viewRect()
                 other.timestamp_label.setPos(view_rect.right(), view_rect.bottom())
                 other.timestamp_label.setText(f"t = {x * 1e3:.2f} ms")
+            main_window.update_status(cursor_time=x)
 
         # Update timestamp label at bottom-right corner
         view_rect = self.viewRect()
@@ -225,25 +256,25 @@ class CursorPlot(pg.PlotWidget):
 
             self.temp_text.setText(f"Δt = {self.format_time(delta_t)}")
             self.temp_text.setPos(mid_x, bottom_y)
+            self.notify_measurement(delta_t)
 
     def mouseReleaseEvent(self, event:QMouseEvent)->None:
-        if self.zoom_mode and self.zoom_start_x is not None:
+        if self.zoom_start_x is not None and self.zoom_region_temp is not None:
             # finalize zoom
             start, end = self.zoom_region_temp.getRegion()
             if start != end:
                 self.setXRange(min(start, end), max(start, end), padding=0)
 
-                if hasattr(self.parent().parent().parent(), "plots"):
-                    self.parent().parent().parent().windowWidth = max(start, end) - min(start, end)
-                    self.parent().parent().parent().tPos = (max(start, end) + min(start, end)) / 2
-
-                    self.parent().parent().parent().updateView()
+                main_window = self.get_main_window()
+                if main_window is not None:
+                    main_window.windowWidth = max(start, end) - min(start, end)
+                    main_window.tPos = (max(start, end) + min(start, end)) / 2
+                    main_window.updateView()
 
             # remove temporary region
             self.removeItem(self.zoom_region_temp)
             self.zoom_region_temp = None
             self.zoom_start_x = None
-            self.zoom_mode = False
         else:
             super().mouseReleaseEvent(event)
 
@@ -265,10 +296,12 @@ class CursorPlot(pg.PlotWidget):
 
         if self.dataLoaded:
             self.hideCursor()
-            if hasattr(self.parent().parent().parent(), "plots"):
-                for other in self.parent().parent().parent().plots:
+            main_window = self.get_main_window()
+            if main_window is not None:
+                for other in main_window.plots:
                     other.hideCursor()
                     other.timestamp_label.setText("")
+                main_window.update_status(cursor_time=None)
 
         super().leaveEvent(event)
 
@@ -280,11 +313,12 @@ class CursorPlot(pg.PlotWidget):
 
         if self.dataLoaded:
             self.showCursor()
-            if hasattr(self.parent().parent().parent(), "plots"):
-                for other in self.parent().parent().parent().plots:
+            main_window = self.get_main_window()
+            if main_window is not None:
+                for other in main_window.plots:
                     other.showCursor()
 
-        super().leaveEvent(event)
+        super().enterEvent(event)
 
     def showCursor(self)->None:
         self.dataLoaded = True
