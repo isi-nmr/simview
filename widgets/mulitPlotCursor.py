@@ -322,6 +322,45 @@ class CursorPlot(pg.PlotWidget):
         if main_window is not None:
             main_window.update_status(measurement=dt_seconds)
 
+    def clear_measurement_overlay(self) -> None:
+        self.start_x = None
+        if self.temp_region:
+            self.removeItem(self.temp_region)
+            self.temp_region = None
+        if self.temp_text:
+            self.removeItem(self.temp_text)
+            self.temp_text = None
+
+    def ensure_measurement_overlay(self, start_x: float) -> None:
+        self.start_x = float(start_x)
+        if self.temp_region is None:
+            self.temp_region = pg.LinearRegionItem(
+                values=(self.start_x, self.start_x),
+                movable=False,
+                brush=(50, 50, 200, 50),
+            )
+            self.addItem(self.temp_region, ignoreBounds=True)
+        else:
+            self.temp_region.setRegion((self.start_x, self.start_x))
+
+        if self.temp_text is None:
+            self.temp_text = pg.TextItem("", color="b", anchor=(0.5, 1))
+            self.addItem(self.temp_text, ignoreBounds=True)
+        self.temp_text.setText("")
+
+    def update_measurement_overlay(self, end_x: float) -> None:
+        if self.start_x is None:
+            return
+        if self.temp_region is None or self.temp_text is None:
+            return
+
+        self.temp_region.setRegion((self.start_x, end_x))
+        mid_x = (self.start_x + end_x) / 2
+        bottom_y = self.viewRange()[1][0]
+        delta_t = abs(end_x - self.start_x)
+        self.temp_text.setText(f"Δt = {self.format_time(delta_t)}")
+        self.temp_text.setPos(mid_x, bottom_y)
+
     def get_snapped_event_x(self, x_value: float) -> float:
         main_window = self.get_main_window()
         if main_window is None or not getattr(main_window, "measureSnapToEvents", False):
@@ -348,52 +387,39 @@ class CursorPlot(pg.PlotWidget):
         mouse_point = self.getViewBox().mapSceneToView(event.position())
         modifiers = QApplication.keyboardModifiers()
         shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        main_window = self.get_main_window()
 
         if self.measure_mode:
-            if self.start_x is None:
-                main_window = self.get_main_window()
+            shared_start_x = getattr(main_window, "measurement_start_x", None) if main_window is not None else self.start_x
+            if shared_start_x is None:
+                start_x = self.get_snapped_event_x(mouse_point.x())
+                if main_window is not None:
+                    main_window.measurement_start_x = start_x
+                    main_window.measurement_source_plot = self
+                    for other in main_window.plots:
+                        other.ensure_measurement_overlay(start_x)
+                else:
+                    self.ensure_measurement_overlay(start_x)
+                self.notify_measurement(None)
+            else:
+                end_x = self.get_snapped_event_x(mouse_point.x())
+                delta_t = abs(end_x - shared_start_x)
                 if main_window is not None:
                     for other in main_window.plots:
-                        if other == self:
-                            continue
-                        other.start_x = None
-                        other.measure_mode = False
-
-                # First click → start measuring
-                self.start_x = self.get_snapped_event_x(mouse_point.x())
-
-                # Create temporary region
-                self.temp_region = pg.LinearRegionItem(
-                    values=(self.start_x, self.start_x),
-                    movable=False,
-                    brush=(50, 50, 200, 50),
-                )
-                self.addItem(self.temp_region, ignoreBounds=True)
-
-                # Text for delta time
-                self.temp_text = pg.TextItem("", color="b", anchor=(0.5, 1))
-                self.addItem(self.temp_text, ignoreBounds=True)
-
-            else:
-                # Second click → finish measurement
-                end_x = self.get_snapped_event_x(mouse_point.x())
-                delta_t = abs(end_x - self.start_x)
-                if self.temp_region:
-                    self.temp_region.setRegion((self.start_x, end_x))
-                if self.temp_text:
-                    mid_x = (self.start_x + end_x) / 2
-                    bottom_y = self.viewRange()[1][0]
-                    self.temp_text.setText(f"Δt = {self.format_time(delta_t)}")
-                    self.temp_text.setPos(mid_x, bottom_y)
+                        other.start_x = shared_start_x
+                        other.update_measurement_overlay(end_x)
+                else:
+                    self.start_x = shared_start_x
+                    self.update_measurement_overlay(end_x)
                 self.notify_measurement(delta_t)
                 self.measure_mode = False
-                self.start_x = None  # reset start for next measurement
-                main_window = self.get_main_window()
+                self.start_x = None
                 if main_window is not None:
+                    main_window.measurement_start_x = None
+                    main_window.measurement_source_plot = None
                     for other in main_window.plots:
                         if other == self:
                             continue
-                        other.start_x = None
                         other.measure_mode = False
 
         elif self.zoom_mode or shift_pressed:
@@ -449,15 +475,7 @@ class CursorPlot(pg.PlotWidget):
 
         """Activate measurement mode and clear previous measurement."""
         self.measure_mode = enabled
-        self.start_x = None
-
-        # Remove previous measurement items
-        if self.temp_region:
-            self.removeItem(self.temp_region)
-            self.temp_region = None
-        if self.temp_text:
-            self.removeItem(self.temp_text)
-            self.temp_text = None
+        self.clear_measurement_overlay()
 
     def enable_zoom_mode(self,*, enabled:None|bool=None)->None:
         if enabled is None:
@@ -519,17 +537,17 @@ class CursorPlot(pg.PlotWidget):
         self.timestamp_label.setText(f"t = {x * 1e3:.2f} ms")
 
         # Update measurement region dynamically
-        if self.measure_mode and self.start_x is not None:
+        shared_start_x = getattr(main_window, "measurement_start_x", None) if main_window is not None else self.start_x
+        if self.measure_mode and shared_start_x is not None:
             end_x = self.get_snapped_event_x(mouse_point.x())
-            # Update LinearRegionItem
-            self.temp_region.setRegion((self.start_x, end_x))
-            # Update text at midpoint
-            mid_x = (self.start_x + end_x) / 2
-            bottom_y = self.viewRange()[1][0]  # bottom of Y-axis
-            delta_t = abs(end_x - self.start_x)
-
-            self.temp_text.setText(f"Δt = {self.format_time(delta_t)}")
-            self.temp_text.setPos(mid_x, bottom_y)
+            delta_t = abs(end_x - shared_start_x)
+            if main_window is not None:
+                for other in main_window.plots:
+                    other.start_x = shared_start_x
+                    other.update_measurement_overlay(end_x)
+            else:
+                self.start_x = shared_start_x
+                self.update_measurement_overlay(end_x)
             self.notify_measurement(delta_t)
 
     def mouseReleaseEvent(self, event:QMouseEvent)->None:

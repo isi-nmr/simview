@@ -198,8 +198,6 @@ class DataLoadingMixin:
         self.imageLayout.removeItem(self.navigation)
 
         pens, penDict = multiplot.makePens()
-        block_signals = True
-        unblock_signals = False
 
         for chanInd, channel in enumerate(self.channels):
             currentPlot = CursorPlot(darkMode=self.darkMode)
@@ -240,17 +238,9 @@ class DataLoadingMixin:
             axis_label, axis_units = self.get_channel_axis_label(channel)
             currentPlot.setLabel("right", axis_label, units=axis_units)
 
-            if self.selectedChannels != []:
-                if channel[0]["chanLabel"] in self.selectedChannels:
-                    phaseContainer.show()
-                    self.checkBoxes[chanInd].blockSignals(block_signals)
-                    self.checkBoxes[chanInd].setChecked(True)
-                    self.checkBoxes[chanInd].blockSignals(unblock_signals)
-                else:
-                    phaseContainer.hide()
-                    self.checkBoxes[chanInd].blockSignals(block_signals)
-                    self.checkBoxes[chanInd].setChecked(False)
-                    self.checkBoxes[chanInd].blockSignals(unblock_signals)
+            # Always sync the initial plot visibility with the checkbox state.
+            # This keeps channels with show=False hidden when no saved selection exists.
+            phaseContainer.setVisible(self.checkBoxes[chanInd].isChecked())
 
             for line in channel:
                 plot_data = line if line.get("drawStyle") == "line" else multiplot.convertToStep(line, "data")

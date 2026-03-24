@@ -42,6 +42,8 @@ class GUIapp(
         self.currentMeasurement = None
         self.currentCursorTime = None
         self.measureSnapToEvents = False
+        self.measurement_start_x: float | None = None
+        self.measurement_source_plot: CursorPlot | None = None
         self.gradientCalibrationHzPerMm = 0.0
         self.nucleusGammaMHzPerT = PROTON_GAMMA_MHZ_PER_T
         self.displayGradientsInMtPerM = False

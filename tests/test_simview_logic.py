@@ -39,6 +39,14 @@ class DummyMainWindow:
         self.window_title = title
 
 
+class DummyPlot:
+    def __init__(self) -> None:
+        self.mode = None
+
+    def set_interaction_mode(self, mode: str) -> None:
+        self.mode = mode
+
+
 @pytest.fixture
 def app_logic() -> GUIapp:
     return make_app()
@@ -158,3 +166,21 @@ def test_gradient_scaling_uses_configured_gamma_for_mt_per_m(app_logic: GUIapp) 
 
     np.testing.assert_allclose(scaled, np.array([0.0, 1.0, 2.0]))
     assert app_logic.get_gradient_display_units("%") == "mT/m"
+
+
+def test_set_interaction_mode_clears_shared_measurement_state(app_logic: GUIapp) -> None:
+    plot = DummyPlot()
+    app_logic.plots = [plot]
+    app_logic.measurement_start_x = 0.123
+    app_logic.measurement_source_plot = object()
+    app_logic.measureSnapToEvents = False
+    app_logic.currentCursorTime = None
+    app_logic.currentMeasurement = None
+    app_logic.windowWidth = 1e-2
+    app_logic.update_status = lambda *args, **kwargs: None
+
+    app_logic.setInteractionMode("inspect")
+
+    assert app_logic.measurement_start_x is None
+    assert app_logic.measurement_source_plot is None
+    assert plot.mode == "inspect"

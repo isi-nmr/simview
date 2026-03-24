@@ -156,6 +156,8 @@ class InteractionMixin:
 
     def setInteractionMode(self, mode: str) -> None:
         self.interactionMode = mode
+        self.measurement_start_x = None
+        self.measurement_source_plot = None
         for plot in self.plots:
             plot.set_interaction_mode(mode)
         self.update_status()
