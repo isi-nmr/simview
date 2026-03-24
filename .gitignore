@@ -4,3 +4,4 @@ __pycache__
 __*
 .ruff_cache
 .venv
+testData

@@ -14,7 +14,7 @@ xmltodict = "^0.14.2"
 pyqt6 = "^6.9.1"
 pyqtgraph = "^0.13.7"
 ruff = ">0.11"
-
+pytest = ">6"
 
 [build-system]
 requires = ["poetry-core"]
@@ -24,33 +24,34 @@ build-backend = "poetry.core.masonry.api"
 [tool.ruff.lint]
 select = [
     "ANN",
-    "E","W",   # pycodestyle
-    "F",   # Pyflakes
-    "UP",  # pyupgrade
-    "B",   # flake8-bugbear
-    "SIM", # flake8-simplify
-    "I",   # isort
-    "PERF",# Perflint
-    "C4",  # Flake8 comprehensions
-    "RET", # Flake8 return
-    "FBT", # Flake8 boolean simplifications
-    "LOG", # Flake8 logging
-    "PL",  # Flake8 pylint
+    "E",
+    "W",    # pycodestyle
+    "F",    # Pyflakes
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "I",    # isort
+    "PERF", # Perflint
+    "C4",   # Flake8 comprehensions
+    "RET",  # Flake8 return
+    "FBT",  # Flake8 boolean simplifications
+    "LOG",  # Flake8 logging
+    "PL",   # Flake8 pylint
     "B9",   # Bugbear additional checks
     "TC",
     "RUF",
     "PT",
     "FLY",
-    "NPY"
+    "NPY",
 ]
-ignore= [
+ignore = [
     "PLR2004",
     "PLR0915",
     "PLR0913",
     "PLR0912",
     "PLR0911",
     "PLC0415",
-    "RUF005"
+    "RUF005",
 ]
 # select = [
 #     # pycodestyle
@@ -78,3 +79,8 @@ target-version = "py313"
 quote-style = "double"
 indent-style = "space"
 docstring-code-format = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"

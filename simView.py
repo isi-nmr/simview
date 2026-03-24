@@ -4,7 +4,6 @@ import os
 import re
 import sys
 import tempfile
-import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -51,7 +50,6 @@ class GUIapp(QMainWindow):
         self.trajectoryZeroReferenceTime: float | None = None
         self.derivedSignalStartupPadding = 1.0
         self.inlineData = data
-        self.performanceDebug = True
 
         path = Path(__file__).resolve().parent / "visusimForm.ui"
         uic.loadUi(path, self)
@@ -1298,14 +1296,8 @@ class GUIapp(QMainWindow):
         self.updateView()
 
     def zoomOut(self) -> None:
-        zoom_start = time.perf_counter()
-        if self.performanceDebug:
-            print(f"[perf {zoom_start:.6f}] zoomOut start width={self.windowWidth:.6g}")
         self.windowWidth = min(self.tMax - self.tMin, self.windowWidth / 0.8)
         self.updateView()
-        if self.performanceDebug:
-            zoom_end = time.perf_counter()
-            print(f"[perf {zoom_end:.6f}] zoomOut end elapsed={(zoom_end - zoom_start) * 1e3:.1f} ms")
 
     def changeXRange(self) -> None:
         self.tPos = self.tSlider.value() * self.sliderScaler
@@ -1322,7 +1314,6 @@ class GUIapp(QMainWindow):
         self.updateView()
 
     def updateView(self) -> None:
-        update_start = time.perf_counter()
         self.windowWidth = min(max(self.windowWidth, self.sliderScaler), self.tMax - self.tMin)
         half_width = self.windowWidth * 0.5
         self.tPos = min(max(self.tPos, self.tMin + half_width), self.tMax - half_width)
@@ -1339,12 +1330,6 @@ class GUIapp(QMainWindow):
         self.settings.setValue("tPos", self.tPos)
         self.settings.setValue("windowWidth", self.windowWidth)
         self.update_status()
-        if self.performanceDebug:
-            update_end = time.perf_counter()
-            print(
-                f"[perf {update_end:.6f}] updateView elapsed={(update_end - update_start) * 1e3:.1f} ms "
-                f"plots={len(self.plots)} range=({rangeNeg:.6g}, {rangePos:.6g})"
-            )
 
     def resetView(self) -> None:
         self.windowWidth = self.tMax - self.tMin

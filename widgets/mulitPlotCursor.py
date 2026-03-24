@@ -1,6 +1,5 @@
 import numpy as np
 import pyqtgraph as pg
-import time
 from PyQt6.QtCore import QPointF, QTimer, Qt
 from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QResizeEvent
 from PyQt6.QtWidgets import QApplication
@@ -154,12 +153,6 @@ class CursorPlot(pg.PlotWidget):
             return
         if self._refresh_in_progress:
             return
-        main_window = self.get_main_window()
-        if main_window is not None and getattr(main_window, "performanceDebug", False):
-            print(
-                f"[perf {time.perf_counter():.6f}] schedule_curve_refresh "
-                f"plot={id(self)} visible={self.isVisible()} resize={self._resize_in_progress}"
-            )
         if self._resize_in_progress:
             self._refresh_timer.start(120)
             return
@@ -174,9 +167,6 @@ class CursorPlot(pg.PlotWidget):
         self._refresh_timer.start(max(delay_ms, 0))
 
     def _handle_refresh_timeout(self) -> None:
-        main_window = self.get_main_window()
-        if main_window is not None and getattr(main_window, "performanceDebug", False):
-            print(f"[perf {time.perf_counter():.6f}] refresh_timer_fired plot={id(self)}")
         self._resize_in_progress = False
         self.refresh_visible_curves()
 
@@ -190,7 +180,6 @@ class CursorPlot(pg.PlotWidget):
         main_window = self.get_main_window()
         if main_window is None:
             return
-        refresh_start = time.perf_counter()
 
         view_box = self.getViewBox()
         view_range = view_box.viewRange()
@@ -239,13 +228,6 @@ class CursorPlot(pg.PlotWidget):
             self._last_refresh_key = refresh_key
         finally:
             self._refresh_in_progress = False
-        if getattr(main_window, "performanceDebug", False):
-            refresh_end = time.perf_counter()
-            print(
-                f"[perf {refresh_end:.6f}] refresh_visible_curves "
-                f"plot={id(self)} curves={len(self.managed_curves)} "
-                f"elapsed={(refresh_end - refresh_start) * 1e3:.1f} ms width={view_width}"
-            )
 
     def notify_measurement(self, dt_seconds: float | None = None) -> None:
         main_window = self.get_main_window()

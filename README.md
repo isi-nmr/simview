@@ -33,3 +33,20 @@ with open(path) as f:
 show_graphs_from_dict(data)    
 
 ```
+
+## Testing
+- Run the full test suite with `pytest`
+
+```bash
+poetry run pytest
+```
+
+- Or, if you are already using the local virtualenv directly:
+
+```bash
+.venv/bin/python -m pytest
+```
+
+- The current tests cover:
+  - core derived-signal logic in `simView.py`
+  - Bruker parser loading against fixture data in `testData/mrScanSim`
