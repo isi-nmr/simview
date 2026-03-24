@@ -1,4 +1,5 @@
 import re
+from collections.abc import Mapping
 
 import numpy as np
 import xmltodict
@@ -59,26 +60,66 @@ def turnOffNco(ncos: dict, ncoNumber: int, t: np.ndarray, ind: int) -> None:
 def getRFEvents(dict: dict) -> tuple[dict, dict]:
     ncos = {}
 
-    info = {}
-    info["pulProg"] = dict["pulseprogram"]["@path"].split("/")[-1]
+    pulse_program = dict["pulseprogram"]
+    info = {"pulProg": pulse_program["@path"].split("/")[-1]}
     ind = 0
-    tUnit = float(dict["pulseprogram"]["@timeunit"])
+    tUnit = float(pulse_program["@timeunit"])
 
     indMaxes = {}
+    line_mapping: dict[int, dict[str, object]] = {}
+    line_event_times: list[float] = []
+    line_event_numbers: list[int] = []
+
+    line_mapping_entries = pulse_program.get("linemapping", {}).get("map", [])
+    if isinstance(line_mapping_entries, Mapping):
+        line_mapping_entries = [line_mapping_entries]
+    for entry in line_mapping_entries:
+        if "@ln" not in entry:
+            continue
+        try:
+            ln_value = int(entry["@ln"])
+        except (TypeError, ValueError):
+            continue
+
+        source_name = (
+            entry.get("@file")
+            or entry.get("@cpd")
+            or entry.get("@intern")
+            or entry.get("@macro")
+            or "unknown"
+        )
+        source_line_value = entry.get("@line", entry.get("@ml"))
+        try:
+            source_line_number = int(source_line_value) if source_line_value is not None else None
+        except (TypeError, ValueError):
+            source_line_number = None
+
+        line_mapping[ln_value] = {
+            "source": str(source_name),
+            "line": source_line_number,
+        }
 
     ncoNumber = None
 
-    for event in dict["pulseprogram"]["ev"]:
+    for event in pulse_program["ev"]:
         if "@t" not in event:
             print("Skip event")
             continue
+
+        event_time = float(event["@t"]) * tUnit
+        if "@ln" in event:
+            try:
+                line_event_times.append(event_time)
+                line_event_numbers.append(int(event["@ln"]))
+            except (TypeError, ValueError):
+                pass
 
         if "@nco" in event:
             if event["@nco"] == "0":
                 turnOffNco(
                     ncos,
                     ncoNumber,
-                    float(event["@t"]) * tUnit,
+                    event_time,
                     indMaxes[str(ncoNumber)],
                 )
                 indMaxes[ncoNumber] += 1
@@ -93,7 +134,7 @@ def getRFEvents(dict: dict) -> tuple[dict, dict]:
 
         ind = indMaxes[str(ncoNumber)]
 
-        ncos[ncoNumber]["t"][ind] = float(event["@t"]) * tUnit
+        ncos[ncoNumber]["t"][ind] = event_time
 
         if "@p0" in event:
             ncos[ncoNumber]["p0"][ind] = float(event["@p0"])
@@ -143,6 +184,10 @@ def getRFEvents(dict: dict) -> tuple[dict, dict]:
             if isinstance(value, np.ndarray):
                 subDict[key] = value[: indMaxes[ncoKey]]
 
+    info["lineMapping"] = line_mapping
+    info["lineEventTimes"] = np.asarray(line_event_times, dtype=float)
+    info["lineEventNumbers"] = np.asarray(line_event_numbers, dtype=int)
+
     return ncos, info
 
 
@@ -164,6 +209,12 @@ def readBrkrChannels(path: str, progress: QProgressDialog, app: QMainWindow)->di
     ncos, info = readRFEvents(path)
 
     app.setWindowTitle(f"{path} originPPG: {info['pulProg']}")
+    app.pulseProgramSource = info.get("pulProg")
+    app.pulseProgramTimeline = (
+        info.get("lineEventTimes"),
+        info.get("lineEventNumbers"),
+    )
+    app.pulseProgramLineMapping = info.get("lineMapping", {})
 
     if progress.wasCanceled():
         return None

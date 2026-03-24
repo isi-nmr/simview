@@ -65,6 +65,9 @@ class DataLoadingMixin:
         self.plots = []
         self.checkBoxes = []
         self.channels = []
+        self.pulseProgramSource = None
+        self.pulseProgramTimeline = None
+        self.pulseProgramLineMapping = {}
 
     def loadData(self, data: str | None = None) -> None:
         self.resetApp()

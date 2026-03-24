@@ -321,6 +321,39 @@ class InteractionMixin:
             return f"{dt_seconds * 1e6:.3f} us"
         return f"{dt_seconds * 1e9:.3f} ns"
 
+    def get_pulse_program_location(self, cursor_time: float | None) -> str:
+        if cursor_time is None:
+            return "-"
+
+        timeline = getattr(self, "pulseProgramTimeline", None)
+        if timeline is None:
+            return "-"
+
+        if not isinstance(timeline, tuple) or len(timeline) != 2:
+            return "-"
+
+        times, line_numbers = timeline
+        if times is None or line_numbers is None:
+            return "-"
+        if len(times) == 0 or len(line_numbers) == 0:
+            return "-"
+
+        index = int(np.searchsorted(times, cursor_time, side="right") - 1)
+        if index < 0:
+            return "-"
+
+        line_number = int(line_numbers[min(index, len(line_numbers) - 1)])
+        mapping = getattr(self, "pulseProgramLineMapping", {})
+        mapped = mapping.get(line_number, {})
+
+        source_name = mapped.get("source")
+        source_line = mapped.get("line")
+        if source_name is not None and source_line is not None:
+            return f"{source_name}:{source_line} (ln {line_number})"
+        if source_name is not None:
+            return f"{source_name} (ln {line_number})"
+        return f"ln {line_number}"
+
     def update_status(
         self,
         cursor_time: float | None | object = _UNSET,
@@ -336,6 +369,7 @@ class InteractionMixin:
         cursor_text = self.format_time(self.currentCursorTime)
         measurement_text = self.format_time(self.currentMeasurement)
         snap_text = "On" if self.measureSnapToEvents else "Off"
+        pulse_program_text = self.get_pulse_program_location(self.currentCursorTime)
         self.statusBar().showMessage(
             " | ".join(
                 (
@@ -344,6 +378,7 @@ class InteractionMixin:
                     f"View width: {span_text}",
                     f"Cursor: {cursor_text}",
                     f"Measurement: {measurement_text}",
+                    f"PPG: {pulse_program_text}",
                 ),
             ),
         )

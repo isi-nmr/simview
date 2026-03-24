@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from simView import PROTON_GAMMA_MHZ_PER_T, GUIapp
-from utils.simUtilsBrkr import readBrkrChannels
+from utils.simUtilsBrkr import getRFEvents, readBrkrChannels
 
 
 def make_app() -> GUIapp:
@@ -184,3 +184,48 @@ def test_set_interaction_mode_clears_shared_measurement_state(app_logic: GUIapp)
     assert app_logic.measurement_start_x is None
     assert app_logic.measurement_source_plot is None
     assert plot.mode == "inspect"
+
+
+def test_get_rf_events_parses_line_mapping_and_timeline() -> None:
+    pulse_program = {
+        "pulseprogram": {
+            "@path": "/tmp/test.ppg",
+            "@timeunit": "1e-6",
+            "linemapping": {
+                "map": [
+                    {"@ln": "10", "@file": "test.ppg", "@line": "20"},
+                    {"@ln": "8000000", "@intern": "DWELL-PROGRAM", "@line": "0"},
+                ],
+            },
+            "ev": [
+                {"@t": "0", "@nco": "1", "@am": "0"},
+                {"@t": "100", "@ln": "10", "@am": "10"},
+                {"@t": "200", "@ln": "8000000", "@am": "5"},
+            ],
+        },
+    }
+
+    _ncos, info = getRFEvents(pulse_program)
+
+    assert info["pulProg"] == "test.ppg"
+    assert info["lineMapping"][10]["source"] == "test.ppg"
+    assert info["lineMapping"][10]["line"] == 20
+    assert info["lineMapping"][8000000]["source"] == "DWELL-PROGRAM"
+    np.testing.assert_allclose(info["lineEventTimes"], np.array([100e-6, 200e-6]))
+    np.testing.assert_array_equal(info["lineEventNumbers"], np.array([10, 8000000]))
+
+
+def test_get_pulse_program_location_uses_nearest_previous_event(app_logic: GUIapp) -> None:
+    app_logic.pulseProgramTimeline = (
+        np.array([0.001, 0.002, 0.003]),
+        np.array([185, 193, 8000000]),
+    )
+    app_logic.pulseProgramLineMapping = {
+        185: {"source": "gradMap.ppg", "line": 48},
+        193: {"source": "SliceSelection.mod", "line": 40},
+        8000000: {"source": "DWELL-PROGRAM", "line": 0},
+    }
+
+    assert app_logic.get_pulse_program_location(0.0005) == "-"
+    assert app_logic.get_pulse_program_location(0.0024) == "SliceSelection.mod:40 (ln 193)"
+    assert app_logic.get_pulse_program_location(0.0031) == "DWELL-PROGRAM:0 (ln 8000000)"
