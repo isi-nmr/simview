@@ -532,12 +532,14 @@ class GUIapp(QMainWindow):
                 if type(currentPen) is str:
                     currentPen = penDict[currentPen]
 
-                currentPlot.plot(
+                plot_curve = currentPlot.plot(
                     stepData["t"],
                     stepData["data"],
                     name=line["label"],
                     pen=currentPen,
                 )
+                plot_curve.setClipToView(True)
+                plot_curve.setSkipFiniteCheck(True)
                 currentPlot.register_curve(line["label"], stepData["t"], stepData["data"])
 
                 if len(line["annotations"]) > 0:
