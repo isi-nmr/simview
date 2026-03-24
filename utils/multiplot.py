@@ -27,6 +27,17 @@ def makePens()->tuple[list, dict]:
 
 def addAnnotations(line:dict, currentPlot: CursorPlot)->None:
     for annotation in line["annotations"]:
+        if "texts" in annotation:
+            color = str(annotation.get("color", "r"))
+            for ind, t in enumerate(annotation["t"]):
+                text_value = annotation["texts"][ind] if ind < len(annotation["texts"]) else str(annotation["texts"][-1])
+                currentPlot.add_annotation_marker(
+                    float(t),
+                    str(text_value),
+                    color=color,
+                )
+            continue
+
         for ind, t in enumerate(annotation["t"]):
             currentPlot.add_annotation_marker(
                 float(t),

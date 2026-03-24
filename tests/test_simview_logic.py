@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 
 from simView import PROTON_GAMMA_MHZ_PER_T, GUIapp
-from utils.simUtilsBrkr import getRFEvents, readBrkrChannels
+from utils import multiplot
+from utils.simUtilsBrkr import build_pulse_program_event_annotations, getRFEvents, readBrkrChannels
 from utils.simUtilsNMRScopeB import readNMRScopeBChannels
 
 
@@ -46,6 +47,14 @@ class DummyPlot:
 
     def set_interaction_mode(self, mode: str) -> None:
         self.mode = mode
+
+
+class DummyCursorPlot:
+    def __init__(self) -> None:
+        self.markers: list[tuple[float, str, str]] = []
+
+    def add_annotation_marker(self, time_value: float, text_value: str, *, color: str = "r") -> None:
+        self.markers.append((time_value, text_value, color))
 
 
 @pytest.fixture
@@ -219,6 +228,124 @@ def test_get_rf_events_parses_line_mapping_and_timeline() -> None:
     assert info["lineMapping"][8000000]["source"] == "DWELL-PROGRAM"
     np.testing.assert_allclose(info["lineEventTimes"], np.array([100e-6, 200e-6]))
     np.testing.assert_array_equal(info["lineEventNumbers"], np.array([10, 8000000]))
+    assert len(info["events"]) == 3
+    assert info["events"][1]["ln"] == "10"
+    assert np.isclose(float(info["events"][2]["t"]), 200e-6)
+
+
+def test_get_rf_events_captures_all_given_event_attributes() -> None:
+    pulse_program = {
+        "pulseprogram": {
+            "@path": "/tmp/test.ppg",
+            "@timeunit": "1e-6",
+            "ev": [
+                {
+                    "@t": "12",
+                    "@ln": "42",
+                    "@seq": "cwait",
+                    "@tr": "10",
+                    "@wl": "3",
+                    "@g": "6",
+                    "@nco": "2",
+                    "@pw": "27.9",
+                    "@ncoc": "9",
+                    "@sf": "400.322",
+                    "@scanidx": "7",
+                    "@scanph": "90",
+                    "@scancmd": "st",
+                    "@wr": "1",
+                    "@if": "2",
+                    "@df": "3",
+                    "@rf": "1",
+                    "@rgp": "0--0x1",
+                    "@p0": "0",
+                    "@p1": "90",
+                    "@p2": "180",
+                    "@am": "50",
+                },
+            ],
+        },
+    }
+
+    _ncos, info = getRFEvents(pulse_program)
+
+    assert len(info["events"]) == 1
+    event = info["events"][0]
+    expected_keys = {
+        "t",
+        "ln",
+        "seq",
+        "tr",
+        "wl",
+        "g",
+        "nco",
+        "pw",
+        "ncoc",
+        "sf",
+        "scanidx",
+        "scanph",
+        "scancmd",
+        "wr",
+        "if",
+        "df",
+        "rf",
+        "rgp",
+        "p0",
+        "p1",
+        "p2",
+        "am",
+    }
+    assert expected_keys.issubset(event.keys())
+    assert event["seq"] == "cwait"
+    assert event["rgp"] == "0--0x1"
+
+
+def test_build_pulse_program_event_annotations_extracts_control_events() -> None:
+    event_infos = [
+        {
+            "fcube": "FCube1",
+            "events": [
+                {"t": 0.001, "nco": "1", "am": "5"},
+                {"t": 0.002, "seq": "cwait", "tr": "10", "ln": "185"},
+                {"t": 0.002, "seq": "cwait", "tr": "10", "ln": "185"},
+            ],
+        },
+        {
+            "fcube": "FCube4",
+            "events": [
+                {"t": 0.002, "seq": "cwait", "tr": "10", "ln": "185"},
+                {"t": 0.003, "scancmd": "st", "wr": "1", "ln": "191"},
+            ],
+        },
+    ]
+
+    annotations = build_pulse_program_event_annotations(event_infos)
+
+    assert len(annotations) == 1
+    annotation = annotations[0]
+    np.testing.assert_allclose(annotation["t"], np.array([0.002, 0.003]))
+    assert annotation["texts"][0] == "seq=cwait | tr=10"
+    assert annotation["texts"][1] == "scan=st | wr=1"
+    assert "scan=st" in annotation["texts"][1]
+
+
+def test_add_annotations_supports_text_labels() -> None:
+    line = {
+        "annotations": [
+            {
+                "t": np.array([0.001, 0.002]),
+                "texts": ["seq=cwait | tr=10", "scan=st | wr=1"],
+                "color": "y",
+            },
+        ],
+    }
+    plot = DummyCursorPlot()
+
+    multiplot.addAnnotations(line, plot)
+
+    assert len(plot.markers) == 2
+    assert plot.markers[0] == (0.001, "seq=cwait | tr=10", "y")
+    assert plot.markers[1] == (0.002, "scan=st | wr=1", "y")
 
 
 def test_get_pulse_program_location_uses_nearest_previous_event(app_logic: GUIapp) -> None:
@@ -268,6 +395,25 @@ def test_read_nmrscopeb_channels_from_fixture_path(nmrscopeb_fixture_path: Path)
     assert gx_channel["units"] == ""
     assert gx_channel["chanLabel"].endswith("(-)")
     assert gx_channel["t"].size == gx_channel["data"].size
+
+
+def test_read_bruker_channels_attaches_pulse_program_event_annotations(bruker_fixture_path: Path) -> None:
+    channels = readBrkrChannels(str(bruker_fixture_path), DummyProgress(), DummyMainWindow())
+
+    assert channels is not None
+    first_channel = channels[0][0]
+    assert len(first_channel["annotations"]) > 0
+    event_annotation = next((ann for ann in first_channel["annotations"] if ann.get("name") == "ppg_events"), None)
+    assert event_annotation is not None
+    assert len(event_annotation["t"]) > 0
+    assert len(event_annotation["texts"]) > 0
+    assert any("wr=" in text for text in event_annotation["texts"])
+
+    gradient_channel = channels[-1]
+    assert len(gradient_channel) == 3
+    assert any(ann.get("name") == "ppg_events" for ann in gradient_channel[0]["annotations"])
+    assert gradient_channel[1]["annotations"] == []
+    assert gradient_channel[2]["annotations"] == []
 
 
 def test_detect_rf_pulse_starts_from_nco_channels(app_logic: GUIapp) -> None:

@@ -1,5 +1,6 @@
 import re
 from collections.abc import Mapping
+from pathlib import Path
 
 import numpy as np
 import xmltodict
@@ -69,6 +70,7 @@ def getRFEvents(dict: dict) -> tuple[dict, dict]:
     line_mapping: dict[int, dict[str, object]] = {}
     line_event_times: list[float] = []
     line_event_numbers: list[int] = []
+    parsed_events: list[dict[str, object]] = []
 
     line_mapping_entries = pulse_program.get("linemapping", {}).get("map", [])
     if isinstance(line_mapping_entries, Mapping):
@@ -107,6 +109,16 @@ def getRFEvents(dict: dict) -> tuple[dict, dict]:
             continue
 
         event_time = float(event["@t"]) * tUnit
+        event_record: dict[str, object] = {"t": event_time}
+        for raw_key, raw_value in event.items():
+            if not raw_key.startswith("@"):
+                continue
+            key = raw_key[1:]
+            if key == "t":
+                continue
+            event_record[key] = raw_value
+        parsed_events.append(event_record)
+
         if "@ln" in event:
             try:
                 line_event_times.append(event_time)
@@ -187,6 +199,7 @@ def getRFEvents(dict: dict) -> tuple[dict, dict]:
     info["lineMapping"] = line_mapping
     info["lineEventTimes"] = np.asarray(line_event_times, dtype=float)
     info["lineEventNumbers"] = np.asarray(line_event_numbers, dtype=int)
+    info["events"] = parsed_events
 
     return ncos, info
 
@@ -198,6 +211,83 @@ def readRFEvents(path: str) -> tuple[dict, dict]:
     ncos, info = getRFEvents(gCube)
 
     return ncos, info
+
+
+def read_all_fcube_event_infos(path: str) -> list[dict[str, object]]:
+    event_infos: list[dict[str, object]] = []
+    fcube_paths = sorted(Path(path).glob("_FCube*.xml"))
+    for fcube_path in fcube_paths:
+        with fcube_path.open() as handle:
+            parsed = xmltodict.parse(handle.read())
+        _ncos, info = getRFEvents(parsed)
+        info["fcube"] = fcube_path.stem
+        event_infos.append(info)
+    return event_infos
+
+
+def build_pulse_program_event_annotations(event_infos: list[dict[str, object]]) -> list[dict]:
+    grouped_events: dict[tuple[float, tuple[str, ...]], dict[str, object]] = {}
+    for info in event_infos:
+        source = str(info.get("fcube", ""))
+        parsed_events = info.get("events", [])
+        if not isinstance(parsed_events, list):
+            continue
+        for event in parsed_events:
+            if "t" not in event:
+                continue
+
+            parts: list[str] = []
+            if "seq" in event:
+                parts.append(f"seq={event['seq']}")
+            if "tr" in event:
+                parts.append(f"tr={event['tr']}")
+            if "scancmd" in event:
+                parts.append(f"scan={event['scancmd']}")
+            if "wl" in event:
+                parts.append(f"wl={event['wl']}")
+            if "wr" in event:
+                parts.append(f"wr={event['wr']}")
+            if "if" in event:
+                parts.append(f"if={event['if']}")
+            if "df" in event:
+                parts.append(f"df={event['df']}")
+            if "rf" in event:
+                parts.append(f"rf={event['rf']}")
+
+            if not parts:
+                continue
+            event_time = float(event["t"])
+            signature = (round(event_time, 12), tuple(parts))
+            if signature not in grouped_events:
+                grouped_events[signature] = {
+                    "time": event_time,
+                    "parts": tuple(parts),
+                    "sources": set(),
+                    "count": 0,
+                }
+            if source:
+                grouped_events[signature]["sources"].add(source)
+            grouped_events[signature]["count"] += 1
+
+    if not grouped_events:
+        return []
+
+    event_times: list[float] = []
+    event_texts: list[str] = []
+    for event_data in sorted(grouped_events.values(), key=lambda item: float(item["time"])):
+        parts = list(event_data["parts"])
+        label = " | ".join(parts)
+        event_times.append(float(event_data["time"]))
+        event_texts.append(label)
+
+    return [
+        {
+            "name": "ppg_events",
+            "t": np.asarray(event_times, dtype=float),
+            "texts": event_texts,
+            "color": "y",
+        },
+    ]
 
 
 def readBrkrChannels(path: str, progress: QProgressDialog, app: QMainWindow)->dict:
@@ -228,6 +318,8 @@ def readBrkrChannels(path: str, progress: QProgressDialog, app: QMainWindow)->di
     progress.setLabelText("Preparing plots gradients")
 
     channels = []
+    event_infos = read_all_fcube_event_infos(path)
+    event_annotations = build_pulse_program_event_annotations(event_infos)
 
     for nco in ncos:
         for key in ncos[nco]:
@@ -252,7 +344,7 @@ def readBrkrChannels(path: str, progress: QProgressDialog, app: QMainWindow)->di
                 "data": ncos[nco][key],
             }
 
-            channelDes["annotations"] = []
+            channelDes["annotations"] = list(event_annotations)
 
             if key == "am":
                 sf = ncos[nco]["sf"]
@@ -292,7 +384,7 @@ def readBrkrChannels(path: str, progress: QProgressDialog, app: QMainWindow)->di
                 "raw_data": grads[0].copy(),
                 "units": "%",
                 "raw_units": "%",
-                "annotations": [],
+                "annotations": list(event_annotations),
                 "pen": "g",
             },
             {
