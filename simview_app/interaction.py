@@ -159,6 +159,7 @@ class InteractionMixin:
         QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Open, self, activated=self.open_folder)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Plus), self, activated=self.zoomIn)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Minus), self, activated=self.zoomOut)
+        QtGui.QShortcut(QtGui.QKeySequence("A"), self, activated=self.autoscale_visible_y)
         QtGui.QShortcut(QtGui.QKeySequence("R"), self, activated=self.resetView)
         QtGui.QShortcut(QtGui.QKeySequence("M"), self, activated=self.measureButton.toggle)
         QtGui.QShortcut(QtGui.QKeySequence("Z"), self, activated=self.zoomModeButton.toggle)
@@ -177,6 +178,7 @@ class InteractionMixin:
             "<b>Ctrl+O</b> Open folder<br>"
             "<b>+</b> Zoom in<br>"
             "<b>-</b> Zoom out<br>"
+            "<b>A</b> Autoscale Y in current X window<br>"
             "<b>Left / Right</b> Pan backward / forward<br>"
             "<b>R</b> Reset full view<br>"
             "<b>M</b> Toggle measure mode<br>"
@@ -191,6 +193,7 @@ class InteractionMixin:
             "<b>Zoom mode</b> Click-drag to zoom into a region<br>"
             "<b>Shift + drag</b> Temporary zoom without switching modes<br>"
             "<b>Mouse wheel</b> Horizontal zoom around cursor<br>"
+            "<b>Ctrl + wheel</b> Vertical zoom around cursor<br>"
             "<b>Shift + wheel</b> Horizontal pan<br>"
             "<b>Double click</b> Reset horizontal view"
         )
@@ -418,6 +421,49 @@ class InteractionMixin:
     def zoomOut(self) -> None:
         self.windowWidth = min(self.tMax - self.tMin, self.windowWidth / 0.8)
         self.updateView()
+
+    def autoscale_visible_y(self) -> None:
+        if not self.plots or not self.channels:
+            return
+
+        for index, plot in enumerate(self.plots):
+            if index >= len(self.channels):
+                continue
+            if index < len(self.plotContainers) and not self.plotContainers[index].isVisible():
+                continue
+
+            x_min, x_max = plot.viewRange()[0]
+            finite_segments: list[np.ndarray] = []
+            for line in self.channels[index]:
+                t_vals = np.asarray(line.get("t", []), dtype=float)
+                y_vals = np.asarray(line.get("data", []), dtype=float)
+                if t_vals.size == 0 or y_vals.size == 0:
+                    continue
+                n = min(t_vals.size, y_vals.size)
+                t_vals = t_vals[:n]
+                y_vals = y_vals[:n]
+                if n == 0:
+                    continue
+
+                left = int(np.searchsorted(t_vals, x_min, side="left"))
+                right = int(np.searchsorted(t_vals, x_max, side="right"))
+                if right <= left:
+                    continue
+                visible = y_vals[left:right]
+                finite = visible[np.isfinite(visible)]
+                if finite.size > 0:
+                    finite_segments.append(finite)
+
+            if not finite_segments:
+                continue
+
+            y_min = min(float(np.min(values)) for values in finite_segments)
+            y_max = max(float(np.max(values)) for values in finite_segments)
+            if np.isclose(y_min, y_max):
+                padding = max(abs(y_min) * 0.05, 1.0)
+            else:
+                padding = max((y_max - y_min) * 0.05, 1e-12)
+            plot.setYRange(y_min - padding, y_max + padding, padding=0)
 
     def zoom_to_cursor(self, cursor_time: float, zoom_factor: float) -> None:
         if self.tMax <= self.tMin:

@@ -1,8 +1,8 @@
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QPointF, Qt, QTimer
-from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QResizeEvent, QShowEvent, QWheelEvent
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QPoint, QPointF, Qt, QTimer
+from PyQt6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QResizeEvent, QShowEvent, QWheelEvent
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox
 
 
 class TextItemWithBg(pg.TextItem):
@@ -62,6 +62,9 @@ class CursorPlot(pg.PlotWidget):
         self.getViewBox().sigYRangeChanged.connect(self.schedule_curve_refresh)
         self.getViewBox().sigXRangeChanged.connect(self.refresh_annotation_positions)
         self.getViewBox().sigYRangeChanged.connect(self.refresh_annotation_positions)
+        self.getPlotItem().hideButtons()
+        if hasattr(self.getPlotItem(), "autoBtn"):
+            self.getPlotItem().autoBtn.hide()
 
         self.temp_region = None
         self.temp_text = None
@@ -78,6 +81,12 @@ class CursorPlot(pg.PlotWidget):
         self.timestamp_label.hide()
         self.point_label.hide()
 
+        # Replace the default pyqtgraph context menu with a minimal export-only menu.
+        self.setMenuEnabled(False)
+        self.getViewBox().setMenuEnabled(False)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_export_context_menu)
+
     def get_main_window(self) -> object | None:
         parent = self.parent()
         while parent is not None:
@@ -85,6 +94,39 @@ class CursorPlot(pg.PlotWidget):
                 return parent
             parent = parent.parent()
         return None
+
+    def show_export_context_menu(self, pos: QPoint) -> None:
+        menu = QMenu(self)
+        export_action = menu.addAction("Export Plot...")
+        selected_action = menu.exec(self.mapToGlobal(pos))
+        if selected_action == export_action:
+            self.export_plot_image()
+
+    def export_plot_image(self) -> None:
+        from pyqtgraph.exporters import ImageExporter
+
+        main_window = self.get_main_window()
+        default_dir = ""
+        if main_window is not None:
+            default_dir = str(getattr(main_window, "dataPath", "") or "")
+        if not default_dir:
+            default_dir = "."
+        default_path = f"{default_dir}/plot_export.png"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Plot",
+            default_path,
+            "PNG Image (*.png)",
+        )
+        if not file_path:
+            return
+
+        try:
+            exporter = ImageExporter(self.getPlotItem())
+            exporter.export(file_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Failed", f"Could not export plot.\n\n{exc}")
 
     def set_interaction_mode(self, mode: str) -> None:
         self.measure_mode = mode == "measure"
@@ -527,8 +569,13 @@ class CursorPlot(pg.PlotWidget):
 
         mouse_point = self.getViewBox().mapSceneToView(event.position())
         modifiers = QApplication.keyboardModifiers()
+        ctrl_pressed = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
         shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
-        if shift_pressed:
+        if ctrl_pressed:
+            wheel_steps = angle_delta_y if angle_delta_y != 0 else angle_delta_x
+            zoom_factor = 0.8 if wheel_steps > 0 else 1.25
+            self.zoom_y_to_cursor(float(mouse_point.y()), zoom_factor)
+        elif shift_pressed:
             wheel_steps = angle_delta_y if angle_delta_y != 0 else angle_delta_x
             pan_fraction = -float(wheel_steps) / 1200.0
             main_window.pan_horizontally(main_window.windowWidth * pan_fraction)
@@ -538,6 +585,22 @@ class CursorPlot(pg.PlotWidget):
             main_window.zoom_to_cursor(float(mouse_point.x()), zoom_factor)
 
         event.accept()
+
+    def zoom_y_to_cursor(self, cursor_y: float, zoom_factor: float) -> None:
+        view_box = self.getViewBox()
+        y_min, y_max = view_box.viewRange()[1]
+        old_height = y_max - y_min
+        if old_height <= 0:
+            return
+
+        min_height = max(old_height * 1e-12, 1e-15)
+        new_height = max(old_height * zoom_factor, min_height)
+
+        relative_position = (cursor_y - y_min) / old_height
+        relative_position = min(max(relative_position, 0.0), 1.0)
+        new_min = cursor_y - relative_position * new_height
+        new_max = new_min + new_height
+        self.setYRange(new_min, new_max, padding=0)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         main_window = self.get_main_window()
@@ -648,6 +711,15 @@ class CursorPlot(pg.PlotWidget):
             self.zoom_start_x = None
         else:
             super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key.Key_A:
+            main_window = self.get_main_window()
+            if main_window is not None and hasattr(main_window, "autoscale_visible_y"):
+                main_window.autoscale_visible_y()
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def format_time(self, dt_seconds:float)->str:
         """Return a human-readable time string for Δt."""
