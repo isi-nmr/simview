@@ -13,6 +13,12 @@ from .constants import _UNSET
 
 
 class InteractionMixin:
+    def get_min_zoom_width(self) -> float:
+        full_width = max(float(getattr(self, "tMax", 0.0)) - float(getattr(self, "tMin", 0.0)), 0.0)
+        if full_width <= 0:
+            return 1e-15
+        return max(full_width * 1e-12, 1e-15)
+
     def make_dark_palette(self) -> QPalette:
         palette = QPalette()
         palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
@@ -406,7 +412,7 @@ class InteractionMixin:
         self.update_status()
 
     def zoomIn(self) -> None:
-        self.windowWidth = max((self.tMax - self.tMin) / self.tSlider.maximum(), self.windowWidth * 0.8)
+        self.windowWidth = max(self.get_min_zoom_width(), self.windowWidth * 0.8)
         self.updateView()
 
     def zoomOut(self) -> None:
@@ -418,7 +424,7 @@ class InteractionMixin:
             return
 
         old_width = self.windowWidth
-        min_width = max((self.tMax - self.tMin) / self.tSlider.maximum(), self.sliderScaler)
+        min_width = self.get_min_zoom_width()
         self.windowWidth = min(max(old_width * zoom_factor, min_width), self.tMax - self.tMin)
 
         if old_width <= 0:
@@ -451,7 +457,7 @@ class InteractionMixin:
         self.updateView()
 
     def updateView(self) -> None:
-        self.windowWidth = min(max(self.windowWidth, self.sliderScaler), self.tMax - self.tMin)
+        self.windowWidth = min(max(self.windowWidth, self.get_min_zoom_width()), self.tMax - self.tMin)
         half_width = self.windowWidth * 0.5
         self.tPos = min(max(self.tPos, self.tMin + half_width), self.tMax - half_width)
         rangePos = self.tPos + half_width

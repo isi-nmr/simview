@@ -32,6 +32,7 @@ class CursorPlot(pg.PlotWidget):
         self._resize_in_progress = False
         self._refresh_in_progress = False
         self.annotation_items: list[dict[str, object]] = []
+        self.change_tick_items: list[dict[str, object]] = []
         super().__init__(*args, **kwargs)
 
         # Create the vertical line cursor
@@ -214,6 +215,34 @@ class CursorPlot(pg.PlotWidget):
         self.schedule_curve_refresh()
         return plot_curve
 
+    def add_change_ticks(
+        self,
+        change_times: np.ndarray,
+        *,
+        color: tuple[int, int, int, int] = (220, 20, 20, 120),
+    ) -> None:
+        times = np.asarray(change_times, dtype=float)
+        if times.size == 0:
+            return
+        finite_times = times[np.isfinite(times)]
+        if finite_times.size == 0:
+            return
+        unique_times = np.unique(finite_times)
+        tick_item = self.plot([], [], pen=pg.mkPen(color=color, width=1))
+        tick_item.setDownsampling(auto=False, ds=1, method="subsample")
+        tick_item.setClipToView(False)
+        tick_item.setSkipFiniteCheck(True)
+        tick_item.setZValue(20)
+        self.change_tick_items.append(
+            {
+                "item": tick_item,
+                "times": unique_times,
+                "cached_render_key": None,
+                "cached_render_data": None,
+            },
+        )
+        self.schedule_curve_refresh()
+
     def update_managed_curve(self, index: int, x_data: np.ndarray, y_data: np.ndarray) -> None:
         if index < 0 or index >= len(self.managed_curves):
             return
@@ -309,6 +338,58 @@ class CursorPlot(pg.PlotWidget):
                     curve["cached_render_key"] = curve_render_key
                     curve["cached_render_data"] = (simplified_x, simplified_y)
                 curve["item"].setData(simplified_x, simplified_y)
+
+            for tick in self.change_tick_items:
+                full_times = np.asarray(tick["times"], dtype=float)
+                tick_render_key = (
+                    refresh_key,
+                    full_times.size,
+                    float(full_times[0]) if full_times.size else 0.0,
+                    float(full_times[-1]) if full_times.size else 0.0,
+                )
+                cached_tick_key = tick.get("cached_render_key")
+                cached_tick_data = tick.get("cached_render_data")
+                if cached_tick_key == tick_render_key and cached_tick_data is not None:
+                    tick_x, tick_y = cached_tick_data
+                else:
+                    if full_times.size == 0:
+                        tick_x = np.asarray([], dtype=float)
+                        tick_y = np.asarray([], dtype=float)
+                    else:
+                        start = int(np.searchsorted(full_times, x_min, side="left"))
+                        stop = int(np.searchsorted(full_times, x_max, side="right"))
+                        visible_times = full_times[start:stop]
+
+                        # Keep all visible sample ticks unless the count becomes extremely large.
+                        # This preserves one-tick-per-sample behavior when zoomed in.
+                        max_visible_ticks = 200_000
+                        if visible_times.size > max_visible_ticks:
+                            step = int(np.ceil(visible_times.size / max_visible_ticks))
+                            visible_times = visible_times[::step]
+                            y_span = max(y_max - y_min, 1e-12)
+                            tick_half = y_span * 0.03
+                            y_bottom = -tick_half
+                            y_top = tick_half
+                            tick_x = np.repeat(visible_times, 2)
+                            tick_y = np.empty(visible_times.size * 2, dtype=float)
+                            tick_y[0::2] = y_bottom
+                            tick_y[1::2] = y_top
+                        elif visible_times.size == 0:
+                            tick_x = np.asarray([], dtype=float)
+                            tick_y = np.asarray([], dtype=float)
+                        else:
+                            y_span = max(y_max - y_min, 1e-12)
+                            tick_half = y_span * 0.03
+                            y_bottom = -tick_half
+                            y_top = tick_half
+                            tick_x = np.repeat(visible_times, 2)
+                            tick_y = np.empty(visible_times.size * 2, dtype=float)
+                            tick_y[0::2] = y_bottom
+                            tick_y[1::2] = y_top
+
+                    tick["cached_render_key"] = tick_render_key
+                    tick["cached_render_data"] = (tick_x, tick_y)
+                tick["item"].setData(tick_x, tick_y, connect="pairs")
 
             self._last_refresh_key = refresh_key
         finally:

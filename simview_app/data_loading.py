@@ -33,6 +33,40 @@ class BrukerLoadWorker(QObject):
 
 
 class DataLoadingMixin:
+    def compute_gradient_sample_ticks(self, channel: list[dict]) -> np.ndarray:
+        grad_lines = [line for line in channel if line.get("type") == "grads"]
+        if not grad_lines:
+            return np.asarray([], dtype=float)
+
+        base_t = np.asarray(grad_lines[0].get("t", []), dtype=float)
+        if base_t.size == 0:
+            return np.asarray([], dtype=float)
+
+        aligned = True
+        for line in grad_lines[1:]:
+            line_t = np.asarray(line.get("t", []), dtype=float)
+            if line_t.shape != base_t.shape or not np.array_equal(line_t, base_t):
+                aligned = False
+                break
+
+        if aligned:
+            ticks = base_t
+        else:
+            collected: list[np.ndarray] = []
+            for line in grad_lines:
+                t = np.asarray(line.get("t", []), dtype=float)
+                if t.size == 0:
+                    continue
+                collected.append(t)
+            if not collected:
+                return np.asarray([], dtype=float)
+            ticks = np.unique(np.concatenate(collected))
+
+        if ticks.size > 2_000_000_000:
+            step = int(np.ceil(ticks.size / 2_000_000_000))
+            ticks = ticks[::step]
+        return ticks
+
     def get_initial_y_range(self, channel: list[dict]) -> tuple[float, float] | None:
         if channel[0]["plotType"] == "phase":
             if channel[0].get("units", "deg") != "rad":
@@ -366,6 +400,11 @@ class DataLoadingMixin:
 
                 if len(line["annotations"]) > 0:
                     multiplot.addAnnotations(line, currentPlot)
+
+            if channel and channel[0].get("type") == "grads":
+                tick_times = self.compute_gradient_sample_ticks(channel)
+                if tick_times.size > 0:
+                    currentPlot.add_change_ticks(tick_times, color=(220, 20, 20, 110))
 
         self.updateView()
         self.filterChannels()
