@@ -97,6 +97,8 @@ class DataLoadingMixin:
             if os.path.exists(self.dataPath + "/" + "pulse_seq.json"):
                 self.channels = readNMRScopeBChannels(self.dataPath, progress, self)
             else:
+                if os.path.exists(self.dataPath+"/mrScanSim"):
+                    self.dataPath = self.dataPath+"/mrScanSim"                  
                 self.channels = readBrkrChannels(self.dataPath, progress, self)
         else:
             self.channels = readNMRScopeBChannels(data, progress, self)
