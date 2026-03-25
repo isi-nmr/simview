@@ -1,11 +1,17 @@
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import numpy as np
 import pytest
 
 from simView import PROTON_GAMMA_MHZ_PER_T, GUIapp
 from utils import multiplot
-from utils.simUtilsBrkr import build_pulse_program_event_annotations, getRFEvents, readBrkrChannels
+from utils.simUtilsBrkr import (
+    build_pulse_program_event_annotations,
+    getRFEvents,
+    readBrkrChannels,
+    read_all_fcube_event_infos,
+)
 from utils.simUtilsNMRScopeB import readNMRScopeBChannels
 
 
@@ -416,6 +422,48 @@ def test_read_bruker_channels_attaches_pulse_program_event_annotations(bruker_fi
     assert not any(ann.get("name") == "ppg_events" for ann in gradient_channel[0]["annotations"])
     assert gradient_channel[1]["annotations"] == []
     assert gradient_channel[2]["annotations"] == []
+
+
+def test_read_all_fcube_event_infos_parses_all_xml_events(bruker_fixture_path: Path) -> None:
+    event_infos = read_all_fcube_event_infos(str(bruker_fixture_path))
+
+    expected_counts: dict[str, int] = {}
+    for fcube_path in sorted(bruker_fixture_path.glob("_FCube*.xml")):
+        root = ET.parse(fcube_path).getroot()
+        expected_counts[fcube_path.stem] = len(root.findall(".//ev"))
+
+    parsed_counts = {
+        str(info["fcube"]): len(info.get("events", []))
+        for info in event_infos
+    }
+
+    assert parsed_counts == expected_counts
+    assert sum(parsed_counts.values()) == sum(expected_counts.values())
+
+
+def test_read_all_fcube_event_infos_preserves_all_event_attributes(bruker_fixture_path: Path) -> None:
+    event_infos = read_all_fcube_event_infos(str(bruker_fixture_path))
+    parsed_infos = {str(info["fcube"]): info for info in event_infos}
+
+    for fcube_path in sorted(bruker_fixture_path.glob("_FCube*.xml")):
+        root = ET.parse(fcube_path).getroot()
+        time_unit = float(root.attrib["timeunit"])
+        xml_events = root.findall(".//ev")
+        parsed_events = parsed_infos[fcube_path.stem]["events"]
+
+        assert len(parsed_events) == len(xml_events)
+
+        for xml_event, parsed_event in zip(xml_events, parsed_events, strict=True):
+            normalized_expected_keys = set(xml_event.attrib.keys())
+            assert set(parsed_event.keys()) == normalized_expected_keys
+
+            if "t" in xml_event.attrib:
+                assert np.isclose(float(parsed_event["t"]), float(xml_event.attrib["t"]) * time_unit)
+
+            for attr_name, attr_value in xml_event.attrib.items():
+                if attr_name == "t":
+                    continue
+                assert str(parsed_event[attr_name]) == attr_value
 
 
 def test_detect_rf_pulse_starts_from_nco_channels(app_logic: GUIapp) -> None:

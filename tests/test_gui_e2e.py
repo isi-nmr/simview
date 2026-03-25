@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +34,20 @@ def isolated_settings(tmp_path: Path) -> None:
     settings.sync()
 
 
+def wait_for_bruker_load(gui: GUIapp, qapp: QtWidgets.QApplication, timeout_s: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        timeline = getattr(gui, "pulseProgramTimeline", None)
+        plots = getattr(gui, "plots", [])
+        if timeline is not None and plots:
+            times, line_numbers = timeline
+            if times is not None and line_numbers is not None and len(times) > 0 and len(line_numbers) > 0:
+                return
+        time.sleep(0.01)
+    pytest.fail("Timed out waiting for asynchronous Bruker load to finish.")
+
+
 def test_jump_targets_available_for_bruker_fixture(
     qapp: QtWidgets.QApplication,
     isolated_settings: None,
@@ -40,6 +55,7 @@ def test_jump_targets_available_for_bruker_fixture(
 ) -> None:
     gui = GUIapp(simPath=str(bruker_fixture_path))
     try:
+        wait_for_bruker_load(gui, qapp)
         targets = gui.get_pulse_program_jump_targets()
         assert len(targets) > 0
         assert any("ln " in target[0] for target in targets)
@@ -56,6 +72,7 @@ def test_jump_to_ppg_line_action_updates_view_to_selected_target(
 ) -> None:
     gui = GUIapp(simPath=str(bruker_fixture_path))
     try:
+        wait_for_bruker_load(gui, qapp)
         targets = gui.get_pulse_program_jump_targets()
         assert len(targets) > 0
         target_index = len(targets) - 1

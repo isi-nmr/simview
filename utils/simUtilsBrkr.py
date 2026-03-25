@@ -291,11 +291,11 @@ def getRFEvents(
         ):
             progress_callback((event_index + 1) / max(total_events, 1), progress_label)
 
-        if "@t" not in event:
-            continue
-
-        event_time = float(event["@t"]) * tUnit
-        event_record: dict[str, object] = {"t": event_time}
+        event_time: float | None = None
+        event_record: dict[str, object] = {}
+        if "@t" in event:
+            event_time = float(event["@t"]) * tUnit
+            event_record["t"] = event_time
         for raw_key, raw_value in event.items():
             if not raw_key.startswith("@"):
                 continue
@@ -304,6 +304,9 @@ def getRFEvents(
                 continue
             event_record[key] = raw_value
         parsed_events.append(event_record)
+
+        if event_time is None:
+            continue
 
         if "@ln" in event:
             try:
