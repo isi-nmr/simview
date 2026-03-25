@@ -95,6 +95,16 @@ class CursorPlot(pg.PlotWidget):
             parent = parent.parent()
         return None
 
+    def get_measurement_region_brush(self) -> tuple[int, int, int, int]:
+        if self.backgroundBrush().color().lightness() < 128:
+            return (90, 120, 255, 80)
+        return (70, 95, 220, 70)
+
+    def get_measurement_label_bg(self) -> QColor:
+        if self.backgroundBrush().color().lightness() < 128:
+            return QColor(10, 15, 35, 220)
+        return QColor(255, 255, 255, 235)
+
     def show_export_context_menu(self, pos: QPoint) -> None:
         menu = QMenu(self)
         export_action = menu.addAction("Export Plot...")
@@ -176,6 +186,12 @@ class CursorPlot(pg.PlotWidget):
             line_item = annotation["line"]
             text_item.bg_color = overlay_bg
             line_item.setPen(pg.mkPen("r", style=Qt.PenStyle.DashLine))
+
+        if self.temp_region is not None:
+            self.temp_region.setBrush(self.get_measurement_region_brush())
+        if self.temp_text is not None:
+            self.temp_text.bg_color = self.get_measurement_label_bg()
+            self.temp_text.setColor(axis_color)
 
     def add_annotation_marker(self, time_value: float, text_value: str, *, color: str = "r") -> None:
         annotation_line = pg.InfiniteLine(
@@ -457,15 +473,25 @@ class CursorPlot(pg.PlotWidget):
             self.temp_region = pg.LinearRegionItem(
                 values=(self.start_x, self.start_x),
                 movable=False,
-                brush=(50, 50, 200, 50),
+                brush=self.get_measurement_region_brush(),
             )
             self.addItem(self.temp_region, ignoreBounds=True)
         else:
             self.temp_region.setRegion((self.start_x, self.start_x))
+            self.temp_region.setBrush(self.get_measurement_region_brush())
 
         if self.temp_text is None:
-            self.temp_text = pg.TextItem("", color="b", anchor=(0.5, 1))
+            label_color = "white" if self.backgroundBrush().color().lightness() < 128 else "black"
+            self.temp_text = TextItemWithBg(
+                "",
+                color=label_color,
+                bg_color=self.get_measurement_label_bg(),
+                anchor=(0.5, 0.5),
+            )
+            self.temp_text.setZValue(110)
             self.addItem(self.temp_text, ignoreBounds=True)
+        else:
+            self.temp_text.bg_color = self.get_measurement_label_bg()
         self.temp_text.setText("")
 
     def update_measurement_overlay(self, end_x: float) -> None:
@@ -476,10 +502,11 @@ class CursorPlot(pg.PlotWidget):
 
         self.temp_region.setRegion((self.start_x, end_x))
         mid_x = (self.start_x + end_x) / 2
-        bottom_y = self.viewRange()[1][0]
+        y_min, y_max = self.viewRange()[1]
+        mid_y = (y_min + y_max) / 2
         delta_t = abs(end_x - self.start_x)
         self.temp_text.setText(f"Δt = {self.format_time(delta_t)}")
-        self.temp_text.setPos(mid_x, bottom_y)
+        self.temp_text.setPos(mid_x, mid_y)
 
     def get_snapped_event_x(self, x_value: float) -> float:
         main_window = self.get_main_window()
