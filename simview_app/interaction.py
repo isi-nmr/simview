@@ -6,6 +6,7 @@ import pyqtgraph as pg
 from PyQt6 import QtGui, QtWidgets
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtWidgets import QListWidgetItem
 from PyQt6.QtWidgets import QApplication
 
 from utils import dialog
@@ -14,6 +15,131 @@ from .constants import _UNSET
 
 
 class InteractionMixin:
+    def format_measurement_entry(
+        self,
+        start_time: float,
+        end_time: float,
+        delta_time: float,
+        label: str = "",
+    ) -> str:
+        start_text = self.format_time(start_time)
+        end_text = self.format_time(end_time)
+        delta_text = self.format_time(delta_time)
+        prefix = f"{label}: " if label else ""
+        return f"{prefix}{delta_text}  [{start_text} -> {end_text}]"
+
+    def refresh_measurements_list(self) -> None:
+        if not hasattr(self, "measurementsListWidget"):
+            return
+
+        selected_row = self.measurementsListWidget.currentRow()
+        self.measurementsListWidget.clear()
+        for measurement in getattr(self, "measurements", []):
+            start_time = float(measurement["start"])
+            end_time = float(measurement["end"])
+            delta_time = float(measurement["delta"])
+            label = str(measurement.get("label", ""))
+            item = QListWidgetItem(self.format_measurement_entry(start_time, end_time, delta_time, label))
+            item.setData(Qt.ItemDataRole.UserRole, measurement)
+            self.measurementsListWidget.addItem(item)
+
+        has_measurements = bool(getattr(self, "measurements", []))
+        if has_measurements:
+            self.measurementsListWidget.setCurrentRow(min(max(selected_row, 0), len(self.measurements) - 1))
+        if hasattr(self, "removeMeasurementButton"):
+            self.removeMeasurementButton.setEnabled(has_measurements)
+        if hasattr(self, "clearMeasurementsButton"):
+            self.clearMeasurementsButton.setEnabled(has_measurements)
+        if hasattr(self, "exportMeasurementsButton"):
+            self.exportMeasurementsButton.setEnabled(has_measurements)
+        self.on_measurement_selection_changed()
+
+    def add_persistent_measurement(self, start_time: float, end_time: float) -> None:
+        normalized_start = min(float(start_time), float(end_time))
+        normalized_end = max(float(start_time), float(end_time))
+        measurement_count = len(getattr(self, "measurements", [])) + 1
+        measurement_entry = {
+            "label": f"Measurement {measurement_count}",
+            "start": normalized_start,
+            "end": normalized_end,
+            "delta": normalized_end - normalized_start,
+        }
+        if not hasattr(self, "measurements"):
+            self.measurements = []
+        self.measurements.append(measurement_entry)
+        self.refresh_measurements_list()
+        self.measurementsListWidget.setCurrentRow(len(self.measurements) - 1)
+
+    def on_measurement_selection_changed(self, *args: object) -> None:
+        if not hasattr(self, "measurementsListWidget") or not hasattr(self, "measurementLabelEdit"):
+            return
+
+        current_row = self.measurementsListWidget.currentRow()
+        has_selection = 0 <= current_row < len(getattr(self, "measurements", []))
+        self.measurementLabelEdit.setEnabled(has_selection)
+        if hasattr(self, "saveMeasurementLabelButton"):
+            self.saveMeasurementLabelButton.setEnabled(has_selection)
+        if not has_selection:
+            self.measurementLabelEdit.clear()
+            return
+        label = str(self.measurements[current_row].get("label", ""))
+        self.measurementLabelEdit.setText(label)
+
+    def rename_selected_measurement(self) -> None:
+        if not hasattr(self, "measurementLabelEdit") or not hasattr(self, "measurementsListWidget"):
+            return
+
+        current_row = self.measurementsListWidget.currentRow()
+        if current_row < 0 or current_row >= len(getattr(self, "measurements", [])):
+            return
+
+        label = self.measurementLabelEdit.text().strip()
+        if not label:
+            label = f"Measurement {current_row + 1}"
+        self.measurements[current_row]["label"] = label
+        self.refresh_measurements_list()
+        self.measurementsListWidget.setCurrentRow(current_row)
+
+    def remove_selected_measurement(self) -> None:
+        if not hasattr(self, "measurementsListWidget"):
+            return
+
+        current_row = self.measurementsListWidget.currentRow()
+        if current_row < 0 or current_row >= len(getattr(self, "measurements", [])):
+            return
+        self.measurements.pop(current_row)
+        self.refresh_measurements_list()
+
+    def clear_measurements(self) -> None:
+        self.measurements = []
+        self.refresh_measurements_list()
+
+    def show_saved_measurement(self, start_time: float, end_time: float) -> None:
+        if not hasattr(self, "plots"):
+            return
+
+        self.measurement_start_x = float(start_time)
+        self.measurement_source_plot = None
+        for plot in self.plots:
+            plot.ensure_measurement_overlay(start_time)
+            plot.update_measurement_overlay(end_time)
+
+    def jump_to_measurement_item(self, item: QListWidgetItem) -> None:
+        measurement = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(measurement, dict):
+            return
+
+        start_time = float(measurement.get("start", 0.0))
+        end_time = float(measurement.get("end", start_time))
+        mid_time = (start_time + end_time) * 0.5
+        self.tPos = mid_time
+        measurement_width = max(end_time - start_time, 0.0)
+        if measurement_width > 0:
+            self.windowWidth = max(self.get_min_zoom_width(), max(self.windowWidth, measurement_width * 1.5))
+        self.updateView()
+        self.show_saved_measurement(start_time, end_time)
+        self.update_status(cursor_time=mid_time, measurement=end_time - start_time)
+
     def update_sidebar_toggle_button(self) -> None:
         if not hasattr(self, "sidebarToggleButton"):
             return

@@ -18,6 +18,88 @@ from widgets.mulitPlotCursor import CursorPlot
 
 
 class ExportMixin:
+    def export_measurements_to_excel(self) -> None:
+        measurements = getattr(self, "measurements", [])
+        if not measurements:
+            dialog.showErrorMessage("There are no saved measurements to export.")
+            return
+
+        default_dir = self.settings.value("lastExportFolder", self.dataPath or QDir.homePath())
+        default_name = Path(default_dir) / "simview_measurements.xlsx"
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export Measurements",
+            str(default_name),
+            "Excel Workbook (*.xlsx)",
+        )
+        if not file_path:
+            return
+
+        output_path = Path(file_path)
+        if output_path.suffix.lower() != ".xlsx":
+            output_path = output_path.with_suffix(".xlsx")
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.setValue("lastExportFolder", str(output_path.parent))
+
+        try:
+            self.write_measurements_xlsx(output_path)
+        except Exception as exc:
+            dialog.showErrorMessage(f"Failed to export measurements: {exc}")
+            return
+
+        self.statusBar().showMessage(f"Exported {len(measurements)} measurements to {output_path}", 5000)
+
+    def write_measurements_xlsx(self, output_path: Path) -> None:
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font
+        except ImportError as exc:
+            raise RuntimeError("openpyxl is not installed. Please install project dependencies first.") from exc
+
+        rows = [["Label", "Start (s)", "End (s)", "Delta (s)", "Start", "End", "Delta"]]
+        for measurement in getattr(self, "measurements", []):
+            start_time = float(measurement["start"])
+            end_time = float(measurement["end"])
+            delta_time = float(measurement["delta"])
+            label = str(measurement.get("label", ""))
+            rows.append(
+                [
+                    label,
+                    f"{start_time:.12g}",
+                    f"{end_time:.12g}",
+                    f"{delta_time:.12g}",
+                    self.format_time(start_time),
+                    self.format_time(end_time),
+                    self.format_time(delta_time),
+                ],
+            )
+
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Measurements"
+
+        for row in rows:
+            worksheet.append(row)
+
+        header_font = Font(bold=True)
+        for cell in worksheet[1]:
+            cell.font = header_font
+
+        column_widths = {
+            "A": 24,
+            "B": 14,
+            "C": 14,
+            "D": 14,
+            "E": 18,
+            "F": 18,
+            "G": 18,
+        }
+        for column_name, width in column_widths.items():
+            worksheet.column_dimensions[column_name].width = width
+
+        workbook.save(output_path)
+
     def build_export_plot(self, plot: CursorPlot) -> pg.PlotWidget:
         source_item = plot.getPlotItem()
         export_plot = pg.PlotWidget()

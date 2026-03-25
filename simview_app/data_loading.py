@@ -134,6 +134,9 @@ class DataLoadingMixin:
         self.plots = []
         self.checkBoxes = []
         self.channels = []
+        self.measurements = []
+        if hasattr(self, "refresh_measurements_list"):
+            self.refresh_measurements_list()
         self.pulseProgramSource = None
         self.pulseProgramTimeline = None
         self.pulseProgramLineMapping = {}

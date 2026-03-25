@@ -558,6 +558,8 @@ class CursorPlot(pg.PlotWidget):
                 else:
                     self.start_x = shared_start_x
                     self.update_measurement_overlay(end_x)
+                if main_window is not None and hasattr(main_window, "add_persistent_measurement"):
+                    main_window.add_persistent_measurement(shared_start_x, end_x)
                 self.notify_measurement(delta_t)
                 self.measure_mode = False
                 self.start_x = None

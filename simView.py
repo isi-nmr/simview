@@ -40,6 +40,7 @@ class GUIapp(
         self.selectedChannels = []
         self.interactionMode = "inspect"
         self.currentMeasurement = None
+        self.measurements: list[dict[str, float | str]] = []
         self.currentCursorTime = None
         self.measureSnapToEvents = False
         self.measurement_start_x: float | None = None
@@ -134,6 +135,10 @@ class GUIapp(
         exportPlotsAction = QtGui.QAction("Export Visible Plots", self)
         exportPlotsAction.triggered.connect(self.export_visible_plots)
         fileMenu.addAction(exportPlotsAction)
+
+        exportMeasurementsAction = QtGui.QAction("Export Measurements", self)
+        exportMeasurementsAction.triggered.connect(self.export_measurements_to_excel)
+        fileMenu.addAction(exportMeasurementsAction)
 
         self.snapMeasureAction = QtGui.QAction("Stick Measurements To Events", self)
         self.snapMeasureAction.setCheckable(True)
@@ -260,6 +265,39 @@ class GUIapp(
         self.settingsLayout.setContentsMargins(10, 10, 10, 10)
         self.settingsLayout.setSpacing(10)
 
+        self.measurementsTab = QtWidgets.QWidget()
+        self.measurementsLayout = QVBoxLayout(self.measurementsTab)
+        self.measurementsLayout.setContentsMargins(10, 10, 10, 10)
+        self.measurementsLayout.setSpacing(10)
+
+        self.measurementsListWidget = QtWidgets.QListWidget()
+        self.measurementsListWidget.itemDoubleClicked.connect(self.jump_to_measurement_item)
+        self.measurementsListWidget.currentItemChanged.connect(self.on_measurement_selection_changed)
+        self.removeMeasurementButton = QtWidgets.QPushButton("Remove Selected")
+        self.removeMeasurementButton.clicked.connect(self.remove_selected_measurement)
+        self.removeMeasurementButton.setEnabled(False)
+        self.clearMeasurementsButton = QtWidgets.QPushButton("Clear All")
+        self.clearMeasurementsButton.clicked.connect(self.clear_measurements)
+        self.clearMeasurementsButton.setEnabled(False)
+        self.measurementLabelEdit = QtWidgets.QLineEdit()
+        self.measurementLabelEdit.setPlaceholderText("Measurement label")
+        self.measurementLabelEdit.setEnabled(False)
+        self.measurementLabelEdit.returnPressed.connect(self.rename_selected_measurement)
+        self.saveMeasurementLabelButton = QtWidgets.QPushButton("Save Label")
+        self.saveMeasurementLabelButton.clicked.connect(self.rename_selected_measurement)
+        self.saveMeasurementLabelButton.setEnabled(False)
+        self.exportMeasurementsButton = QtWidgets.QPushButton("Export to Excel")
+        self.exportMeasurementsButton.clicked.connect(self.export_measurements_to_excel)
+        self.exportMeasurementsButton.setEnabled(False)
+        self.measurementsHint = QtWidgets.QLabel("Completed measurements are saved here. Double-click one to jump to it.")
+        self.measurementsHint.setWordWrap(True)
+        self.measurementButtonsLayout = QtWidgets.QHBoxLayout()
+        self.measurementButtonsLayout.addWidget(self.removeMeasurementButton)
+        self.measurementButtonsLayout.addWidget(self.clearMeasurementsButton)
+        self.measurementLabelLayout = QtWidgets.QHBoxLayout()
+        self.measurementLabelLayout.addWidget(self.measurementLabelEdit)
+        self.measurementLabelLayout.addWidget(self.saveMeasurementLabelButton)
+
         self.gradientCalibrationSpinBox = QtWidgets.QDoubleSpinBox()
         self.gradientCalibrationSpinBox.setDecimals(3)
         self.gradientCalibrationSpinBox.setRange(0.0, 1_000_000.0)
@@ -335,9 +373,17 @@ class GUIapp(
         self.nucleusGammaSpinBox.valueChanged.connect(self.update_scanner_settings_display)
         self.update_scanner_settings_display()
 
+        self.measurementsLayout.addWidget(self.measurementsHint)
+        self.measurementsLayout.addWidget(self.measurementsListWidget)
+        self.measurementsLayout.addLayout(self.measurementLabelLayout)
+        self.measurementsLayout.addLayout(self.measurementButtonsLayout)
+        self.measurementsLayout.addWidget(self.exportMeasurementsButton)
+
         self.sideTabs.addTab(self.channelsTab, "Channels")
         self.sideTabs.addTab(self.settingsTab, "Settings")
+        self.sideTabs.addTab(self.measurementsTab, "Measurements")
         self.sidePanelLayout.addWidget(self.sideTabs)
+        self.refresh_measurements_list()
         self.sidePanelDock.hide()
 
         plot_layout_item = self.horizontalLayout_2.takeAt(0)
