@@ -15,6 +15,7 @@ pyqt6 = "^6.9.1"
 pyqtgraph = "^0.14.0"
 ruff = ">0.11"
 pytest = ">6"
+lxml = "^6.0.2"
 
 [build-system]
 requires = ["poetry-core"]

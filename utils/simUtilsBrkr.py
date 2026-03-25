@@ -1,9 +1,16 @@
+import os
 import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import numpy as np
 import xmltodict
+
+try:
+    from lxml import etree as LET
+except ImportError:  # pragma: no cover - optional dependency
+    LET = None
 
 
 def getGradEvents(dict: dict) -> tuple[np.ndarray, np.ndarray]:
@@ -28,37 +35,164 @@ def getGradEvents(dict: dict) -> tuple[np.ndarray, np.ndarray]:
     return time[:ind], grads[:, :ind]
 
 
+def _count_event_tags(xml_path: str) -> int:
+    count = 0
+    needle = b"<ev"
+    with open(xml_path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            count += chunk.count(needle)
+    return count
+
+
+def _is_tag(element_tag: object, name: str) -> bool:
+    if not isinstance(element_tag, str):
+        return False
+    return element_tag == name or element_tag.endswith("}" + name)
+
+
+def _find_xml_attr(line: bytes, key: bytes) -> bytes | None:
+    start = line.find(key)
+    if start < 0:
+        return None
+    start += len(key)
+    end = line.find(b'"', start)
+    if end < 0:
+        return None
+    return line[start:end]
+
+
+def _readGrads_fast_line(
+    gcube_path: str,
+    progress_callback: Callable[[float, str], None] | None = None,
+    progress_label: str = "Parsing gradient events",
+) -> tuple[np.ndarray, np.ndarray]:
+    line_ev_count = 0
+    token_ev_count = 0
+    with open(gcube_path, "rb") as handle:
+        for raw_line in handle:
+            stripped = raw_line.lstrip()
+            token_ev_count += stripped.count(b"<ev")
+            if stripped.startswith(b"<ev"):
+                line_ev_count += 1
+
+    if line_ev_count == 0:
+        return np.zeros(0, dtype=float), np.zeros((3, 0), dtype=float)
+
+    # Guardrail: if many <ev tokens are not line-oriented, fast parser may miss data.
+    if token_ev_count > line_ev_count * 1.05:
+        raise ValueError("GCube XML is not line-oriented enough for fast parser")
+
+    t = np.zeros(line_ev_count, dtype=float)
+    grads = np.zeros((3, line_ev_count), dtype=float)
+    t_unit = None
+
+    progress_step = max(line_ev_count // 200, 1)
+    parsed_lines = 0
+    grad_index = 0
+    with open(gcube_path, "rb") as handle:
+        for raw_line in handle:
+            stripped = raw_line.lstrip()
+            if t_unit is None and stripped.startswith(b"<pulseprogram"):
+                raw_timeunit = _find_xml_attr(stripped, b'timeunit="')
+                if raw_timeunit is not None:
+                    t_unit = float(raw_timeunit)
+
+            if not stripped.startswith(b"<ev"):
+                continue
+
+            if progress_callback is not None and (
+                parsed_lines % progress_step == 0 or parsed_lines == line_ev_count - 1
+            ):
+                progress_callback((parsed_lines + 1) / line_ev_count, progress_label)
+
+            parsed_lines += 1
+
+            g1 = _find_xml_attr(stripped, b'g1="')
+            if g1 is None:
+                continue
+            g2 = _find_xml_attr(stripped, b'g2="')
+            g3 = _find_xml_attr(stripped, b'g3="')
+            tv = _find_xml_attr(stripped, b't="')
+            if g2 is None or g3 is None or tv is None:
+                continue
+
+            unit = 1.0 if t_unit is None else t_unit
+            t[grad_index] = float(tv) * unit
+            grads[:, grad_index] = [float(g1), float(g2), float(g3)]
+            grad_index += 1
+
+    return t[:grad_index], grads[:, :grad_index]
+
+
 def readGrads(
     path: str,
     progress_callback: Callable[[float, str], None] | None = None,
     progress_label: str = "Parsing gradient events",
 ) -> tuple[np.ndarray, np.ndarray]:
-    with open(path + "/" + "_GCube.xml") as f:
-        gCube = xmltodict.parse(f.read())
+    gcube_path = path + "/" + "_GCube.xml"
+    grad_parser = os.environ.get("SIMVIEW_GRAD_PARSER", "auto").lower()
+    if grad_parser not in {"auto", "fast", "xml"}:
+        grad_parser = "auto"
 
-    events = gCube["pulseprogram"]["ev"]
-    if isinstance(events, Mapping):
-        events = [events]
-    total_events = len(events)
+    if grad_parser in {"auto", "fast"}:
+        try:
+            return _readGrads_fast_line(
+                gcube_path,
+                progress_callback=progress_callback,
+                progress_label=progress_label,
+            )
+        except Exception:
+            if grad_parser == "fast":
+                raise
+
+    total_events = _count_event_tags(gcube_path)
     progress_step = max(total_events // 200, 1) if total_events > 0 else 1
 
-    time = np.zeros(total_events)
-    grads = np.zeros((3, total_events))
-    tUnit = float(gCube["pulseprogram"]["@timeunit"])
-    ind = 0
-    for event_index, event in enumerate(events):
+    time = np.zeros(max(total_events, 1), dtype=float)
+    grads = np.zeros((3, max(total_events, 1)), dtype=float)
+
+    t_unit = 1.0
+    event_index = 0
+    grad_index = 0
+
+    xml_backend = os.environ.get("SIMVIEW_XML_BACKEND", "et").lower()
+    parser = LET if xml_backend == "lxml" and LET is not None else ET
+    context = parser.iterparse(gcube_path, events=("start", "end"))
+    for parse_event, element in context:
+        if parse_event == "start" and _is_tag(element.tag, "pulseprogram"):
+            raw_timeunit = element.attrib.get("timeunit")
+            if raw_timeunit is not None:
+                t_unit = float(raw_timeunit)
+            continue
+
+        if parse_event != "end" or not _is_tag(element.tag, "ev"):
+            continue
+
         if progress_callback is not None and (
             event_index % progress_step == 0 or event_index == total_events - 1
         ):
             progress_callback((event_index + 1) / max(total_events, 1), progress_label)
 
-        if "@g1" not in event:
-            continue
-        time[ind] = float(event["@t"]) * tUnit
-        grads[:, ind] = [float(event["@g1"]), float(event["@g2"]), float(event["@g3"])]
-        ind += 1
+        attrs = element.attrib
+        event_index += 1
+        if "g1" in attrs and "g2" in attrs and "g3" in attrs and "t" in attrs:
+            if grad_index >= time.size:
+                new_size = max(time.size * 2, grad_index + 1)
+                new_time = np.zeros(new_size, dtype=float)
+                new_grads = np.zeros((3, new_size), dtype=float)
+                new_time[:grad_index] = time[:grad_index]
+                new_grads[:, :grad_index] = grads[:, :grad_index]
+                time = new_time
+                grads = new_grads
+            time[grad_index] = float(attrs["t"]) * t_unit
+            grads[:, grad_index] = [float(attrs["g1"]), float(attrs["g2"]), float(attrs["g3"])]
+            grad_index += 1
+        element.clear()
 
-    return time[:ind], grads[:, :ind]
+    return time[:grad_index], grads[:, :grad_index]
 
 
 def initNco(nEvents: int) -> dict:
@@ -147,7 +281,6 @@ def getRFEvents(
             progress_callback((event_index + 1) / max(total_events, 1), progress_label)
 
         if "@t" not in event:
-            print("Skip event")
             continue
 
         event_time = float(event["@t"]) * tUnit
@@ -262,9 +395,13 @@ def readRFEvents(
 def read_all_fcube_event_infos(
     path: str,
     progress_callback: Callable[[float, str], None] | None = None,
+    skip_fcube_stems: set[str] | None = None,
 ) -> list[dict[str, object]]:
     event_infos: list[dict[str, object]] = []
+    skipped_stems = skip_fcube_stems if skip_fcube_stems is not None else set()
     fcube_paths = sorted(Path(path).glob("_FCube*.xml"))
+    filtered_paths = [fcube_path for fcube_path in fcube_paths if fcube_path.stem not in skipped_stems]
+    fcube_paths = filtered_paths
     total_files = len(fcube_paths)
     if total_files == 0:
         return event_infos
@@ -408,10 +545,12 @@ def parseBrkrChannels(
 
     emit_progress(55, "Parsing FCube event files")
     channels = []
-    event_infos = read_all_fcube_event_infos(
+    event_infos = [dict(info, fcube="_FCube1")]
+    event_infos.extend(read_all_fcube_event_infos(
         path,
         progress_callback=lambda fraction, label: emit_progress(55 + int(20 * fraction), label),
-    )
+        skip_fcube_stems={"_FCube1"},
+    ))
     emit_progress(76, "Building event annotations")
     event_annotations = build_pulse_program_event_annotations(
         event_infos,
