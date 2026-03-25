@@ -2,13 +2,34 @@ import os
 
 import numpy as np
 from PyQt6 import QtWidgets
-from PyQt6.QtCore import QCoreApplication, Qt
+from PyQt6.QtCore import QCoreApplication, QObject, QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
 from utils import multiplot
-from utils.simUtilsBrkr import readBrkrChannels
+from utils.simUtilsBrkr import parseBrkrChannels
 from utils.simUtilsNMRScopeB import readNMRScopeBChannels
 from widgets.mulitPlotCursor import CursorPlot
+
+
+class BrukerLoadWorker(QObject):
+    finished = pyqtSignal(int, object, object)
+    failed = pyqtSignal(int, str)
+    progress = pyqtSignal(int, int, str)
+
+    def __init__(self, path: str, load_id: int) -> None:
+        super().__init__()
+        self.path = path
+        self.load_id = load_id
+
+    def run(self) -> None:
+        try:
+            def emit_progress(value: int, label: str) -> None:
+                self.progress.emit(self.load_id, value, label)
+
+            channels, info = parseBrkrChannels(self.path, progress_callback=emit_progress)
+            self.finished.emit(self.load_id, channels, info)
+        except Exception as exc:
+            self.failed.emit(self.load_id, str(exc))
 
 
 class DataLoadingMixin:
@@ -81,6 +102,8 @@ class DataLoadingMixin:
             self.nextRfPulseAction.setEnabled(False)
 
     def loadData(self, data: str | None = None) -> None:
+        self._loadRequestId = getattr(self, "_loadRequestId", 0) + 1
+        load_id = self._loadRequestId
         self.resetApp()
         if data is not None:
             self.inlineData = data
@@ -97,12 +120,16 @@ class DataLoadingMixin:
             if os.path.exists(self.dataPath + "/" + "pulse_seq.json"):
                 self.channels = readNMRScopeBChannels(self.dataPath, progress, self)
             else:
-                if os.path.exists(self.dataPath+"/mrScanSim"):
-                    self.dataPath = self.dataPath+"/mrScanSim"                  
-                self.channels = readBrkrChannels(self.dataPath, progress, self)
+                if os.path.exists(self.dataPath + "/mrScanSim"):
+                    self.dataPath = self.dataPath + "/mrScanSim"
+                self._start_bruker_load(path=self.dataPath, progress=progress, load_id=load_id)
+                return
         else:
             self.channels = readNMRScopeBChannels(data, progress, self)
 
+        self._complete_channel_load(progress=progress)
+
+    def _complete_channel_load(self, progress: QtWidgets.QProgressDialog) -> None:
         self.update_gradient_channels()
         self.channels.extend(self.build_gradient_derived_channels())
         self.channels.extend(self.build_nco_power_derived_channels())
@@ -135,6 +162,75 @@ class DataLoadingMixin:
             plot.set_interaction_mode(self.interactionMode)
         self.update_rf_pulse_navigation_state()
         self.update_status(cursor_time=None, measurement=self.currentMeasurement)
+
+    def _start_bruker_load(self, path: str, progress: QtWidgets.QProgressDialog, load_id: int) -> None:
+        progress.setLabelText("Starting Bruker parsing...")
+        progress.setRange(0, 100)
+        progress.setValue(10)
+        progress.setCancelButton(None)
+        self._loadProgress = progress
+
+        self._brukerLoadThread = QThread(self)
+        self._brukerLoadWorker = BrukerLoadWorker(path, load_id)
+        self._brukerLoadWorker.moveToThread(self._brukerLoadThread)
+
+        self._brukerLoadThread.started.connect(self._brukerLoadWorker.run)
+        self._brukerLoadWorker.progress.connect(self._on_bruker_load_progress)
+        self._brukerLoadWorker.finished.connect(self._on_bruker_load_finished)
+        self._brukerLoadWorker.failed.connect(self._on_bruker_load_failed)
+        self._brukerLoadWorker.finished.connect(self._brukerLoadThread.quit)
+        self._brukerLoadWorker.failed.connect(self._brukerLoadThread.quit)
+        self._brukerLoadThread.finished.connect(self._brukerLoadWorker.deleteLater)
+        self._brukerLoadThread.finished.connect(self._brukerLoadThread.deleteLater)
+        self._brukerLoadThread.start()
+
+    def _on_bruker_load_progress(self, load_id: int, value: int, label: str) -> None:
+        if load_id != getattr(self, "_loadRequestId", -1):
+            return
+
+        progress = getattr(self, "_loadProgress", None)
+        if progress is None:
+            return
+
+        progress.setValue(value)
+        progress.setLabelText(label)
+
+    def _on_bruker_load_finished(self, load_id: int, channels: list[list[dict]], info: dict[str, object]) -> None:
+        if load_id != getattr(self, "_loadRequestId", -1):
+            return
+
+        progress = getattr(self, "_loadProgress", None)
+        if progress is None:
+            return
+
+        self.channels = channels
+        source = str(info.get("pulProg", ""))
+        self.pulseProgramSource = source or None
+        self.pulseProgramTimeline = (
+            info.get("lineEventTimes"),
+            info.get("lineEventNumbers"),
+        )
+        self.pulseProgramLineMapping = info.get("lineMapping", {})
+        if source:
+            self.setWindowTitle(f"{self.dataPath} originPPG: {source}")
+
+        self._complete_channel_load(progress=progress)
+        self._loadProgress = None
+
+    def _on_bruker_load_failed(self, load_id: int, error: str) -> None:
+        if load_id != getattr(self, "_loadRequestId", -1):
+            return
+
+        progress = getattr(self, "_loadProgress", None)
+        if progress is not None:
+            progress.close()
+            self._loadProgress = None
+
+        QtWidgets.QMessageBox.critical(
+            self,
+            "Bruker Load Failed",
+            f"Could not parse Bruker files.\n\n{error}",
+        )
 
     def registerCheckBoxes(self) -> None:
         if hasattr(self, "channelListLayout"):

@@ -1,20 +1,23 @@
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import numpy as np
 import xmltodict
-from PyQt6.QtWidgets import QMainWindow, QProgressDialog
 
 
 def getGradEvents(dict: dict) -> tuple[np.ndarray, np.ndarray]:
-    time = np.zeros(len(dict["pulseprogram"]["ev"]))
+    events = dict["pulseprogram"]["ev"]
+    if isinstance(events, Mapping):
+        events = [events]
+
+    time = np.zeros(len(events))
 
     tUnit = float(dict["pulseprogram"]["@timeunit"])
 
-    grads = np.zeros((3, len(dict["pulseprogram"]["ev"])))
+    grads = np.zeros((3, len(events)))
     ind = 0
-    for event in dict["pulseprogram"]["ev"]:
+    for event in events:
         if "@g1" not in event:
             continue
 
@@ -25,13 +28,37 @@ def getGradEvents(dict: dict) -> tuple[np.ndarray, np.ndarray]:
     return time[:ind], grads[:, :ind]
 
 
-def readGrads(path: str) -> tuple[np.ndarray, np.ndarray]:
+def readGrads(
+    path: str,
+    progress_callback: Callable[[float, str], None] | None = None,
+    progress_label: str = "Parsing gradient events",
+) -> tuple[np.ndarray, np.ndarray]:
     with open(path + "/" + "_GCube.xml") as f:
         gCube = xmltodict.parse(f.read())
 
-    time, grads = getGradEvents(gCube)
+    events = gCube["pulseprogram"]["ev"]
+    if isinstance(events, Mapping):
+        events = [events]
+    total_events = len(events)
+    progress_step = max(total_events // 200, 1) if total_events > 0 else 1
 
-    return time, grads
+    time = np.zeros(total_events)
+    grads = np.zeros((3, total_events))
+    tUnit = float(gCube["pulseprogram"]["@timeunit"])
+    ind = 0
+    for event_index, event in enumerate(events):
+        if progress_callback is not None and (
+            event_index % progress_step == 0 or event_index == total_events - 1
+        ):
+            progress_callback((event_index + 1) / max(total_events, 1), progress_label)
+
+        if "@g1" not in event:
+            continue
+        time[ind] = float(event["@t"]) * tUnit
+        grads[:, ind] = [float(event["@g1"]), float(event["@g2"]), float(event["@g3"])]
+        ind += 1
+
+    return time[:ind], grads[:, :ind]
 
 
 def initNco(nEvents: int) -> dict:
@@ -58,7 +85,11 @@ def turnOffNco(ncos: dict, ncoNumber: int, t: np.ndarray, ind: int) -> None:
     ncos[ncoNumber]["rgp"][ind] = 0
 
 
-def getRFEvents(dict: dict) -> tuple[dict, dict]:
+def getRFEvents(
+    dict: dict,
+    progress_callback: Callable[[float, str], None] | None = None,
+    progress_label: str = "Parsing RF events",
+) -> tuple[dict, dict]:
     ncos = {}
 
     pulse_program = dict["pulseprogram"]
@@ -103,7 +134,18 @@ def getRFEvents(dict: dict) -> tuple[dict, dict]:
 
     ncoNumber = None
 
-    for event in pulse_program["ev"]:
+    events = pulse_program["ev"]
+    if isinstance(events, Mapping):
+        events = [events]
+    total_events = len(events)
+    progress_step = max(total_events // 200, 1) if total_events > 0 else 1
+
+    for event_index, event in enumerate(events):
+        if progress_callback is not None and (
+            event_index % progress_step == 0 or event_index == total_events - 1
+        ):
+            progress_callback((event_index + 1) / max(total_events, 1), progress_label)
+
         if "@t" not in event:
             print("Skip event")
             continue
@@ -204,29 +246,63 @@ def getRFEvents(dict: dict) -> tuple[dict, dict]:
     return ncos, info
 
 
-def readRFEvents(path: str) -> tuple[dict, dict]:
+def readRFEvents(
+    path: str,
+    progress_callback: Callable[[float, str], None] | None = None,
+    progress_label: str = "Parsing RF events",
+) -> tuple[dict, dict]:
     with open(path + "/" + "_FCube1.xml") as f:
         gCube = xmltodict.parse(f.read())
 
-    ncos, info = getRFEvents(gCube)
+    ncos, info = getRFEvents(gCube, progress_callback=progress_callback, progress_label=progress_label)
 
     return ncos, info
 
 
-def read_all_fcube_event_infos(path: str) -> list[dict[str, object]]:
+def read_all_fcube_event_infos(
+    path: str,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> list[dict[str, object]]:
     event_infos: list[dict[str, object]] = []
     fcube_paths = sorted(Path(path).glob("_FCube*.xml"))
-    for fcube_path in fcube_paths:
+    total_files = len(fcube_paths)
+    if total_files == 0:
+        return event_infos
+
+    for file_index, fcube_path in enumerate(fcube_paths):
+        def _per_file_progress(file_fraction: float, label: str) -> None:
+            if progress_callback is None:
+                return
+            combined = (file_index + file_fraction) / total_files
+            progress_callback(combined, label)
+
         with fcube_path.open() as handle:
             parsed = xmltodict.parse(handle.read())
-        _ncos, info = getRFEvents(parsed)
+        _ncos, info = getRFEvents(
+            parsed,
+            progress_callback=_per_file_progress,
+            progress_label=f"Parsing {fcube_path.name}",
+        )
         info["fcube"] = fcube_path.stem
         event_infos.append(info)
+    if progress_callback is not None:
+        progress_callback(1.0, "Parsed FCube files")
     return event_infos
 
 
-def build_pulse_program_event_annotations(event_infos: list[dict[str, object]]) -> list[dict]:
+def build_pulse_program_event_annotations(
+    event_infos: list[dict[str, object]],
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> list[dict]:
     grouped_events: dict[tuple[float, tuple[str, ...]], dict[str, object]] = {}
+    total_events = 0
+    for info in event_infos:
+        parsed_events = info.get("events", [])
+        if isinstance(parsed_events, list):
+            total_events += len(parsed_events)
+    processed_events = 0
+    progress_step = max(total_events // 200, 1) if total_events > 0 else 1
+
     for info in event_infos:
         source = str(info.get("fcube", ""))
         parsed_events = info.get("events", [])
@@ -254,6 +330,15 @@ def build_pulse_program_event_annotations(event_infos: list[dict[str, object]]) 
             if "rf" in event:
                 parts.append(f"rf={event['rf']}")
 
+            processed_events += 1
+            if progress_callback is not None and (
+                processed_events % progress_step == 0 or processed_events == total_events
+            ):
+                progress_callback(
+                    processed_events / max(total_events, 1),
+                    "Building event annotations",
+                )
+
             if not parts:
                 continue
             event_time = float(event["t"])
@@ -270,6 +355,8 @@ def build_pulse_program_event_annotations(event_infos: list[dict[str, object]]) 
             grouped_events[signature]["count"] += 1
 
     if not grouped_events:
+        if progress_callback is not None:
+            progress_callback(1.0, "Building event annotations")
         return []
 
     event_times: list[float] = []
@@ -290,37 +377,54 @@ def build_pulse_program_event_annotations(event_infos: list[dict[str, object]]) 
     ]
 
 
-def readBrkrChannels(path: str, progress: QProgressDialog, app: QMainWindow)->dict:
-    progress.setLabelText("Reading RF Events")
+def parseBrkrChannels(
+    path: str,
+    progress_callback: Callable[[int, str], None] | None = None,
+) -> tuple[list[list[dict]], dict[str, object]]:
+    last_progress_value = 0
 
-    if progress.wasCanceled():
-        return None
+    def emit_progress(value: int, label: str) -> None:
+        nonlocal last_progress_value
+        clamped_value = max(0, min(99, int(value)))
+        if clamped_value < last_progress_value:
+            clamped_value = last_progress_value
+        last_progress_value = clamped_value
+        if progress_callback is not None:
+            progress_callback(clamped_value, label)
 
-    ncos, info = readRFEvents(path)
-
-    app.setWindowTitle(f"{path} originPPG: {info['pulProg']}")
-    app.pulseProgramSource = info.get("pulProg")
-    app.pulseProgramTimeline = (
-        info.get("lineEventTimes"),
-        info.get("lineEventNumbers"),
+    emit_progress(10, "Reading RF events")
+    ncos, info = readRFEvents(
+        path,
+        progress_callback=lambda fraction, label: emit_progress(10 + int(35 * fraction), label),
+        progress_label="Parsing _FCube1.xml events",
     )
-    app.pulseProgramLineMapping = info.get("lineMapping", {})
 
-    if progress.wasCanceled():
-        return None
-    progress.setValue(40)
-    progress.setLabelText("Reading gradients")
+    emit_progress(46, "Reading gradients")
+    gradTime, grads = readGrads(
+        path,
+        progress_callback=lambda fraction, label: emit_progress(46 + int(8 * fraction), label),
+        progress_label="Parsing _GCube.xml events",
+    )
 
-    gradTime, grads = readGrads(path)
-
-    progress.setValue(50)
-
-    progress.setLabelText("Preparing plots gradients")
-
+    emit_progress(55, "Parsing FCube event files")
     channels = []
-    event_infos = read_all_fcube_event_infos(path)
-    event_annotations = build_pulse_program_event_annotations(event_infos)
+    event_infos = read_all_fcube_event_infos(
+        path,
+        progress_callback=lambda fraction, label: emit_progress(55 + int(20 * fraction), label),
+    )
+    emit_progress(76, "Building event annotations")
+    event_annotations = build_pulse_program_event_annotations(
+        event_infos,
+        progress_callback=lambda fraction, label: emit_progress(76 + int(7 * fraction), label),
+    )
 
+    # Build NCO channels and emit coarse-grained progress for long runs.
+    total_nco_channels = 0
+    for nco_key in ncos:
+        total_nco_channels += sum(1 for key in ncos[nco_key] if key not in {"t", "sf"})
+    built_nco_channels = 0
+
+    emit_progress(83, "Preparing NCO channels")
     for nco in ncos:
         for key in ncos[nco]:
             if key in {"t", "sf"}:
@@ -368,6 +472,10 @@ def readBrkrChannels(path: str, progress: QProgressDialog, app: QMainWindow)->di
                     )
 
             channels.append([channelDes])
+            built_nco_channels += 1
+            if total_nco_channels > 0:
+                progress_value = 83 + int(12 * built_nco_channels / total_nco_channels)
+                emit_progress(min(progress_value, 95), "Preparing NCO channels")
 
     if event_annotations:
         event_times = np.asarray(event_annotations[0].get("t", np.asarray([], dtype=float)), dtype=float)
@@ -388,6 +496,7 @@ def readBrkrChannels(path: str, progress: QProgressDialog, app: QMainWindow)->di
             ]
         )
 
+    emit_progress(96, "Preparing gradient channels")
     channels.append(
         [
             {
@@ -435,5 +544,36 @@ def readBrkrChannels(path: str, progress: QProgressDialog, app: QMainWindow)->di
             },
         ]
     )
+
+    emit_progress(98, "Finalizing Bruker channels")
+    return channels, info
+
+
+def readBrkrChannels(path: str, progress=None, app=None) -> dict:
+    if progress is not None:
+        progress.setLabelText("Reading RF Events")
+        if hasattr(progress, "wasCanceled") and progress.wasCanceled():
+            return None
+
+    def _progress(value: int, label: str) -> None:
+        if progress is None:
+            return
+        progress.setValue(value)
+        progress.setLabelText(label)
+
+    channels, info = parseBrkrChannels(path, progress_callback=_progress)
+
+    if app is not None:
+        app.setWindowTitle(f"{path} originPPG: {info['pulProg']}")
+        app.pulseProgramSource = info.get("pulProg")
+        app.pulseProgramTimeline = (
+            info.get("lineEventTimes"),
+            info.get("lineEventNumbers"),
+        )
+        app.pulseProgramLineMapping = info.get("lineMapping", {})
+
+    if progress is not None:
+        progress.setValue(98)
+        progress.setLabelText("Preparing plots gradients")
 
     return channels
