@@ -50,7 +50,7 @@ class GUIapp(
         self.rfPulseStartTimes = None
         self.gradientCalibrationHzPerMm = 0.0
         self.nucleusGammaMHzPerT = PROTON_GAMMA_MHZ_PER_T
-        self.displayGradientsInMtPerM = False
+        self.gradientDisplayUnits = "hz_per_mm"
         self.themeMode = "system"
         self.trajectoryZeroReferenceTime: float | None = None
         self.derivedSignalStartupPadding = 0.010
@@ -185,9 +185,14 @@ class GUIapp(
         self.snapMeasureAction.setChecked(self.measureSnapToEvents)
         self.gradientCalibrationHzPerMm = float(self.settings.value("gradientCalibrationHzPerMm", 0.0, type=float))
         self.nucleusGammaMHzPerT = float(self.settings.value("nucleusGammaMHzPerT", PROTON_GAMMA_MHZ_PER_T, type=float))
-        self.displayGradientsInMtPerM = bool(
-            self.settings.value("displayGradientsInMtPerM", default_false, type=bool),
-        )
+        stored_gradient_display_units = self.settings.value("gradientDisplayUnits", None)
+        if stored_gradient_display_units in {None, ""}:
+            legacy_display_mt_per_m = bool(
+                self.settings.value("displayGradientsInMtPerM", default_false, type=bool),
+            )
+            self.gradientDisplayUnits = "mt_per_m" if legacy_display_mt_per_m else "hz_per_mm"
+        else:
+            self.gradientDisplayUnits = str(stored_gradient_display_units).lower()
         self.themeMode = str(self.settings.value("themeMode", "system")).lower()
         self.derivedSignalStartupPadding = float(self.settings.value("derivedSignalStartupPadding", 1e-2, type=float))
         stored_trajectory_zero = self.settings.value("trajectoryZeroReferenceTime", None)
@@ -265,8 +270,12 @@ class GUIapp(
         self.derivedSignalStartupPaddingSpinBox.setSingleStep(0.1)
         self.derivedSignalStartupPaddingSpinBox.setSuffix(" s")
         self.derivedSignalStartupPaddingSpinBox.setValue(self.derivedSignalStartupPadding)
-        self.displayGradientsInMtPerMCheckBox = QtWidgets.QCheckBox("Display physical gradients in mT/m")
-        self.displayGradientsInMtPerMCheckBox.setChecked(self.displayGradientsInMtPerM)
+        self.gradientDisplayUnitsComboBox = QtWidgets.QComboBox()
+        self.gradientDisplayUnitsComboBox.addItem("Percent", "percent")
+        self.gradientDisplayUnitsComboBox.addItem("Hz/mm", "hz_per_mm")
+        self.gradientDisplayUnitsComboBox.addItem("mT/m", "mt_per_m")
+        gradient_display_index = max(self.gradientDisplayUnitsComboBox.findData(self.gradientDisplayUnits), 0)
+        self.gradientDisplayUnitsComboBox.setCurrentIndex(gradient_display_index)
         self.applyScannerSettingsButton = QtWidgets.QPushButton("Apply Settings")
         self.applyScannerSettingsButton.clicked.connect(self.apply_scanner_settings)
 
@@ -289,7 +298,7 @@ class GUIapp(
         scannerLayout.addRow("Grad Calibration", self.gradientCalibrationSpinBox)
         scannerLayout.addRow("Nucleus Gamma", self.nucleusGammaSpinBox)
         scannerLayout.addRow("Max Grad @ 100%", self.maxGradientStrengthValue)
-        scannerLayout.addRow(self.displayGradientsInMtPerMCheckBox)
+        scannerLayout.addRow("Gradient Display", self.gradientDisplayUnitsComboBox)
         scannerGroupLayout.addLayout(scannerLayout)
 
         derivedSignalsGroup = QtWidgets.QGroupBox("Derived Signals")

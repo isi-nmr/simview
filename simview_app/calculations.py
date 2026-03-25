@@ -27,9 +27,18 @@ class CalculationMixin:
     def hz_per_mm_to_t_per_m(self, data: np.ndarray) -> np.ndarray:
         return self.hz_per_mm_to_mt_per_m(data) * 1e-3
 
+    def get_gradient_display_mode(self) -> str:
+        mode = str(getattr(self, "gradientDisplayUnits", "hz_per_mm")).lower()
+        if mode in {"percent", "hz_per_mm", "mt_per_m"}:
+            return mode
+        return "hz_per_mm"
+
     def get_gradient_display_units(self, raw_units: str | None) -> str:
         if self.gradientCalibrationHzPerMm > 0 and self.is_percent_gradient_units(raw_units):
-            if self.displayGradientsInMtPerM:
+            mode = self.get_gradient_display_mode()
+            if mode == "percent":
+                return "%"
+            if mode == "mt_per_m":
                 return "mT/m"
             return "Hz/mm"
         return (raw_units or "").strip() or "%"
@@ -37,8 +46,11 @@ class CalculationMixin:
     def scale_gradient_data(self, data: np.ndarray, raw_units: str | None) -> np.ndarray:
         scaled = np.asarray(data, dtype=float)
         if self.gradientCalibrationHzPerMm > 0 and self.is_percent_gradient_units(raw_units):
+            mode = self.get_gradient_display_mode()
+            if mode == "percent":
+                return scaled
             scaled_hz_per_mm = scaled * (self.gradientCalibrationHzPerMm / 100.0)
-            if self.displayGradientsInMtPerM:
+            if mode == "mt_per_m":
                 return self.hz_per_mm_to_mt_per_m(scaled_hz_per_mm)
             return scaled_hz_per_mm
         return scaled
@@ -346,7 +358,7 @@ class CalculationMixin:
             if physical_hz_per_mm is not None:
                 physical_hz_per_mm = np.asarray(physical_hz_per_mm, dtype=float)
                 _, slew_hz_per_mm = self.compute_gradient_slew_rate_profile(time, physical_hz_per_mm)
-                if self.displayGradientsInMtPerM:
+                if self.get_gradient_display_mode() == "mt_per_m":
                     slew_time, _ = self.normalize_time_series(time, physical_hz_per_mm)
                     slew_data = self.hz_per_mm_to_t_per_m(slew_hz_per_mm)
                     slew_units = "T/m/s"

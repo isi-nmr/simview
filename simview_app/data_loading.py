@@ -33,6 +33,18 @@ class BrukerLoadWorker(QObject):
 
 
 class DataLoadingMixin:
+    def get_channel_checkbox_key(self, channel: list[dict]) -> str:
+        return str(channel[0].get("chanLabel", ""))
+
+    def format_channel_checkbox_label(self, channel: list[dict]) -> str:
+        return self.get_channel_checkbox_key(channel)
+
+    def refresh_channel_checkbox_labels(self) -> None:
+        for index, check_box in enumerate(self.checkBoxes):
+            if index >= len(self.channels):
+                break
+            check_box.setText(self.format_channel_checkbox_label(self.channels[index]))
+
     def compute_gradient_sample_ticks(self, channel: list[dict]) -> np.ndarray:
         grad_lines = [line for line in channel if line.get("type") == "grads"]
         if not grad_lines:
@@ -276,10 +288,12 @@ class DataLoadingMixin:
 
         for channel in self.channels:
             checkBox = QtWidgets.QCheckBox()
-            checkBox.setText(channel[0]["chanLabel"])
+            channel_key = self.get_channel_checkbox_key(channel)
+            checkBox.channel_key = channel_key
+            checkBox.setText(self.format_channel_checkbox_label(channel))
             default_show = channel[0].get("show", True)
             if self.selectedChannels:
-                default_show = channel[0]["chanLabel"] in self.selectedChannels
+                default_show = channel_key in self.selectedChannels
             checkBox.setChecked(default_show)
             checkBox.stateChanged.connect(self.checkBoxChanged)
             self.channelListLayout.addWidget(checkBox)
@@ -289,7 +303,7 @@ class DataLoadingMixin:
         if not hasattr(checkBox, "contID"):
             return
 
-        channel_name = checkBox.text()
+        channel_name = str(getattr(checkBox, "channel_key", checkBox.text()))
         is_checked = checkBox.isChecked()
         if is_checked:
             if channel_name not in self.selectedChannels:

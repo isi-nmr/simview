@@ -13,7 +13,7 @@ def make_app() -> GUIapp:
     app = GUIapp.__new__(GUIapp)
     app.gradientCalibrationHzPerMm = 0.0
     app.nucleusGammaMHzPerT = PROTON_GAMMA_MHZ_PER_T
-    app.displayGradientsInMtPerM = False
+    app.gradientDisplayUnits = "hz_per_mm"
     app.trajectoryZeroReferenceTime = None
     app.derivedSignalStartupPadding = 1.0
     app.channels = []
@@ -175,7 +175,7 @@ def test_build_nco_power_derived_channels_merges_event_times(app_logic: GUIapp) 
 def test_gradient_scaling_uses_configured_gamma_for_mt_per_m(app_logic: GUIapp) -> None:
     app_logic.gradientCalibrationHzPerMm = 42.0
     app_logic.nucleusGammaMHzPerT = 21.0
-    app_logic.displayGradientsInMtPerM = True
+    app_logic.gradientDisplayUnits = "mt_per_m"
 
     scaled = app_logic.scale_gradient_data(np.array([0.0, 50.0, 100.0]), "%")
 

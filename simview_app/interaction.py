@@ -376,6 +376,8 @@ class InteractionMixin:
             self.maxGradientStrengthValue.setText("-")
         else:
             self.maxGradientStrengthValue.setText(f"{max_gradient_mt_per_m:.6f} mT/m")
+        if hasattr(self, "refresh_channel_checkbox_labels"):
+            self.refresh_channel_checkbox_labels()
 
     def rebuild_loaded_channels(self) -> None:
         if not self.channels:
@@ -399,18 +401,22 @@ class InteractionMixin:
         self.themeMode = self.themeModeComboBox.currentData()
         self.gradientCalibrationHzPerMm = float(self.gradientCalibrationSpinBox.value())
         self.nucleusGammaMHzPerT = float(self.nucleusGammaSpinBox.value())
-        self.displayGradientsInMtPerM = self.displayGradientsInMtPerMCheckBox.isChecked()
+        self.gradientDisplayUnits = str(self.gradientDisplayUnitsComboBox.currentData() or "hz_per_mm")
         self.derivedSignalStartupPadding = float(self.derivedSignalStartupPaddingSpinBox.value())
         self.settings.setValue("themeMode", self.themeMode)
         self.settings.setValue("gradientCalibrationHzPerMm", self.gradientCalibrationHzPerMm)
         self.settings.setValue("nucleusGammaMHzPerT", self.nucleusGammaMHzPerT)
-        self.settings.setValue("displayGradientsInMtPerM", self.displayGradientsInMtPerM)
+        self.settings.setValue("gradientDisplayUnits", self.gradientDisplayUnits)
         self.settings.setValue("derivedSignalStartupPadding", self.derivedSignalStartupPadding)
         self.apply_theme_settings()
         self.update_existing_plot_themes()
         self.update_scanner_settings_display()
         if self.channels:
-            self.selectedChannels = [check_box.text() for check_box in self.checkBoxes if check_box.isChecked()]
+            self.selectedChannels = [
+                str(getattr(check_box, "channel_key", check_box.text()))
+                for check_box in self.checkBoxes
+                if check_box.isChecked()
+            ]
             self.reload_current_data()
         self.update_status()
 
