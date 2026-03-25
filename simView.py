@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from PyQt6 import QtGui, QtWidgets, uic
 from PyQt6.QtCore import QDir, QSettings, Qt
-from PyQt6.QtWidgets import QApplication, QMainWindow, QSizePolicy, QVBoxLayout
+from PyQt6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QSizePolicy, QVBoxLayout
 
 from simview_app.calculations import CalculationMixin
 from simview_app.constants import PROTON_GAMMA_MHZ_PER_T
@@ -84,27 +84,13 @@ class GUIapp(
         self.tSlider.valueChanged.connect(self.changeXRange)
         self.tSlider.setMinimum(0)
         self.tSlider.setMaximum(10000)
-        self.tSlider.setStyleSheet("""
-            QSlider::handle:horizontal {
-                width: 30px;
-                height: 30px;
-                background: #3498db;
-                border: 1px solid #2980b9;
-                border-radius: 5px;
-                margin: -5px 0;
-            }
-            QSlider::groove:horizontal {
-                height: 10px;
-                background: #bdc3c7;
-                border-radius: 5px;
-            }
-        """)
 
         self.zoomInButton = QtWidgets.QPushButton("Zoom +")
         self.zoomOutButton = QtWidgets.QPushButton("Zoom -")
         self.resetViewButton = QtWidgets.QPushButton("Reset View")
         self.zoomModeButton = QtWidgets.QPushButton("Zoom Mode")
         self.zoomModeButton.setCheckable(True)
+        self.zoomModeButton.setObjectName("modeToggleButton")
         self.zoomInButton.setFixedHeight(50)
         self.zoomOutButton.setFixedHeight(50)
         self.resetViewButton.setFixedHeight(50)
@@ -116,6 +102,7 @@ class GUIapp(
 
         self.measureButton = QtWidgets.QPushButton("Measure")
         self.measureButton.setCheckable(True)
+        self.measureButton.setObjectName("modeToggleButton")
         self.measureButton.toggled.connect(self.toggleMeasureMode)
 
         buttonLayout = QtWidgets.QHBoxLayout()
@@ -203,16 +190,44 @@ class GUIapp(
         self.selectedChannels = self.settings.value("selectedChannels", [])
         if not isinstance(self.selectedChannels, list):
             self.selectedChannels = [self.selectedChannels] if self.selectedChannels else []
+        self.sidebarCollapsed = bool(self.settings.value("sidebarCollapsed", False, type=bool))
+        self.sidebarWidth = int(self.settings.value("sidebarWidth", 260, type=int))
 
         self.sidePanel = QtWidgets.QWidget()
         self.sidePanel.setMinimumWidth(180)
-        self.sidePanel.setMaximumWidth(320)
-        self.sidePanel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.sidePanel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.sidePanelLayout = QVBoxLayout(self.sidePanel)
+        self.sidePanelLayout.setContentsMargins(10, 10, 10, 10)
+        self.sidePanelLayout.setSpacing(10)
         self.sideTabs = QtWidgets.QTabWidget()
+        self.sideTabs.setDocumentMode(True)
+
+        self.sidebarToggleButton = QtWidgets.QPushButton()
+        self.sidebarToggleButton.setObjectName("sidebarToggleButton")
+        self.sidebarToggleButton.setFixedWidth(22)
+        self.sidebarToggleButton.setFixedHeight(56)
+        self.sidebarToggleButton.clicked.connect(self.toggle_side_panel)
+
+        self.sidebarRail = QtWidgets.QWidget()
+        self.sidebarRail.setObjectName("sidebarRail")
+        self.sidebarRailLayout = QVBoxLayout(self.sidebarRail)
+        self.sidebarRailLayout.setContentsMargins(0, 10, 0, 10)
+        self.sidebarRailLayout.setSpacing(8)
+        self.sidebarRailLayout.addWidget(self.sidebarToggleButton, alignment=Qt.AlignmentFlag.AlignTop)
+        self.sidebarRailLayout.addStretch(1)
+
+        self.sidePanelDock = QtWidgets.QWidget()
+        self.sidePanelDock.setObjectName("sidePanelDock")
+        self.sidePanelDockLayout = QHBoxLayout(self.sidePanelDock)
+        self.sidePanelDockLayout.setContentsMargins(0, 0, 0, 0)
+        self.sidePanelDockLayout.setSpacing(0)
+        self.sidePanelDockLayout.addWidget(self.sidebarRail)
+        self.sidePanelDockLayout.addWidget(self.sidePanel, stretch=1)
 
         self.channelsTab = QtWidgets.QWidget()
         self.channelsLayout = QVBoxLayout(self.channelsTab)
+        self.channelsLayout.setContentsMargins(10, 10, 10, 10)
+        self.channelsLayout.setSpacing(10)
 
         self.channelFilter = QtWidgets.QLineEdit()
         self.channelFilter.setPlaceholderText("Filter channels...")
@@ -242,12 +257,15 @@ class GUIapp(
 
         self.settingsTab = QtWidgets.QWidget()
         self.settingsLayout = QVBoxLayout(self.settingsTab)
+        self.settingsLayout.setContentsMargins(10, 10, 10, 10)
+        self.settingsLayout.setSpacing(10)
 
         self.gradientCalibrationSpinBox = QtWidgets.QDoubleSpinBox()
         self.gradientCalibrationSpinBox.setDecimals(3)
         self.gradientCalibrationSpinBox.setRange(0.0, 1_000_000.0)
         self.gradientCalibrationSpinBox.setSingleStep(1.0)
         self.gradientCalibrationSpinBox.setSuffix(" Hz/mm @ 100%")
+        self.gradientCalibrationSpinBox.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.gradientCalibrationSpinBox.setValue(self.gradientCalibrationHzPerMm)
         self.themeModeComboBox = QtWidgets.QComboBox()
         self.themeModeComboBox.addItem("System", "system")
@@ -257,10 +275,11 @@ class GUIapp(
         self.themeModeComboBox.setCurrentIndex(theme_index)
         self.themeModeComboBox.currentIndexChanged.connect(self.on_theme_mode_changed)
         self.nucleusGammaSpinBox = QtWidgets.QDoubleSpinBox()
-        self.nucleusGammaSpinBox.setDecimals(6)
+        self.nucleusGammaSpinBox.setDecimals(3)
         self.nucleusGammaSpinBox.setRange(0.001, 1_000.0)
         self.nucleusGammaSpinBox.setSingleStep(0.1)
         self.nucleusGammaSpinBox.setSuffix(" MHz/T")
+        self.nucleusGammaSpinBox.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.nucleusGammaSpinBox.setValue(self.nucleusGammaMHzPerT)
         self.maxGradientStrengthValue = QtWidgets.QLineEdit()
         self.maxGradientStrengthValue.setReadOnly(True)
@@ -269,6 +288,7 @@ class GUIapp(
         self.derivedSignalStartupPaddingSpinBox.setRange(0.0, 10_000.0)
         self.derivedSignalStartupPaddingSpinBox.setSingleStep(0.1)
         self.derivedSignalStartupPaddingSpinBox.setSuffix(" s")
+        self.derivedSignalStartupPaddingSpinBox.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.derivedSignalStartupPaddingSpinBox.setValue(self.derivedSignalStartupPadding)
         self.gradientDisplayUnitsComboBox = QtWidgets.QComboBox()
         self.gradientDisplayUnitsComboBox.addItem("Percent", "percent")
@@ -277,6 +297,7 @@ class GUIapp(
         gradient_display_index = max(self.gradientDisplayUnitsComboBox.findData(self.gradientDisplayUnits), 0)
         self.gradientDisplayUnitsComboBox.setCurrentIndex(gradient_display_index)
         self.applyScannerSettingsButton = QtWidgets.QPushButton("Apply Settings")
+        self.applyScannerSettingsButton.setObjectName("primaryButton")
         self.applyScannerSettingsButton.clicked.connect(self.apply_scanner_settings)
 
         appearanceGroup = QtWidgets.QGroupBox("Appearance")
@@ -305,20 +326,6 @@ class GUIapp(
         derivedSignalsLayout = QtWidgets.QFormLayout(derivedSignalsGroup)
         derivedSignalsLayout.addRow("Startup Padding", self.derivedSignalStartupPaddingSpinBox)
 
-        group_box_style = """
-            QGroupBox {
-                margin-top: 0.8em;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 4px;
-            }
-        """
-        appearanceGroup.setStyleSheet(group_box_style)
-        scannerGroup.setStyleSheet(group_box_style)
-        derivedSignalsGroup.setStyleSheet(group_box_style)
-
         self.settingsLayout.addWidget(appearanceGroup)
         self.settingsLayout.addWidget(scannerGroup)
         self.settingsLayout.addWidget(derivedSignalsGroup)
@@ -331,11 +338,27 @@ class GUIapp(
         self.sideTabs.addTab(self.channelsTab, "Channels")
         self.sideTabs.addTab(self.settingsTab, "Settings")
         self.sidePanelLayout.addWidget(self.sideTabs)
-        self.sidePanel.hide()
+        self.sidePanelDock.hide()
 
-        self.horizontalLayout_2.insertWidget(0, self.sidePanel)
-        self.horizontalLayout_2.setStretch(0, 0)
-        self.horizontalLayout_2.setStretch(1, 1)
+        plot_layout_item = self.horizontalLayout_2.takeAt(0)
+        assert plot_layout_item is not None
+        plot_layout = plot_layout_item.layout()
+        assert plot_layout is not None
+        self.plotAreaWidget = QtWidgets.QWidget()
+        self.plotAreaWidget.setObjectName("plotAreaWidget")
+        self.plotAreaWidget.setLayout(plot_layout)
+
+        self.mainSplitter = QtWidgets.QSplitter(Qt.Orientation.Horizontal)
+        self.mainSplitter.setObjectName("mainSplitter")
+        self.mainSplitter.setChildrenCollapsible(False)
+        self.mainSplitter.addWidget(self.sidePanelDock)
+        self.mainSplitter.addWidget(self.plotAreaWidget)
+        self.mainSplitter.setStretchFactor(0, 0)
+        self.mainSplitter.setStretchFactor(1, 1)
+        self.mainSplitter.splitterMoved.connect(self.on_main_splitter_moved)
+        self.mainSplitter.setSizes([max(self.sidebarWidth, 180) + self.sidebarRail.sizeHint().width(), 900])
+        self.horizontalLayout_2.addWidget(self.mainSplitter)
+        self.update_sidebar_toggle_button()
 
         qt_app = QApplication.instance()
         assert qt_app is not None

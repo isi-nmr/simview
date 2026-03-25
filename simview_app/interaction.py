@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
@@ -13,6 +14,56 @@ from .constants import _UNSET
 
 
 class InteractionMixin:
+    def update_sidebar_toggle_button(self) -> None:
+        if not hasattr(self, "sidebarToggleButton"):
+            return
+        collapsed = bool(getattr(self, "sidebarCollapsed", False))
+        self.sidebarToggleButton.setText(">" if collapsed else "<")
+        self.sidebarToggleButton.setToolTip("Show sidebar" if collapsed else "Hide sidebar")
+
+    def set_sidebar_available(self, available: bool) -> None:
+        if not hasattr(self, "sidePanelDock"):
+            return
+        self.sidePanelDock.setVisible(available)
+        if not available:
+            return
+        self.set_side_panel_collapsed(bool(getattr(self, "sidebarCollapsed", False)), save_setting=False)
+
+    def set_side_panel_collapsed(self, collapsed: bool, *, save_setting: bool = True) -> None:
+        if not hasattr(self, "mainSplitter") or not hasattr(self, "sidePanelDock"):
+            return
+
+        self.sidebarCollapsed = collapsed
+        rail_width = max(self.sidebarRail.sizeHint().width(), self.sidebarToggleButton.width())
+
+        if collapsed:
+            current_width = max(self.mainSplitter.sizes()[0] - rail_width, 0)
+            if current_width > 0:
+                self.sidebarWidth = current_width
+            self.sidePanel.hide()
+            self.mainSplitter.setSizes([rail_width, max(self.mainSplitter.width() - rail_width, 1)])
+        else:
+            self.sidePanel.show()
+            target_width = max(int(getattr(self, "sidebarWidth", 260)), 180)
+            self.mainSplitter.setSizes([target_width + rail_width, max(self.mainSplitter.width() - target_width, 1)])
+
+        self.update_sidebar_toggle_button()
+        if save_setting and hasattr(self, "settings"):
+            self.settings.setValue("sidebarCollapsed", self.sidebarCollapsed)
+            self.settings.setValue("sidebarWidth", int(getattr(self, "sidebarWidth", 260)))
+
+    def toggle_side_panel(self) -> None:
+        self.set_side_panel_collapsed(not bool(getattr(self, "sidebarCollapsed", False)))
+
+    def on_main_splitter_moved(self, pos: int, index: int) -> None:
+        if not hasattr(self, "mainSplitter") or bool(getattr(self, "sidebarCollapsed", False)):
+            return
+        rail_width = max(self.sidebarRail.width(), self.sidebarToggleButton.width())
+        sidebar_width = max(self.mainSplitter.sizes()[0] - rail_width, 180)
+        self.sidebarWidth = sidebar_width
+        if hasattr(self, "settings"):
+            self.settings.setValue("sidebarWidth", sidebar_width)
+
     def get_min_zoom_width(self) -> float:
         full_width = max(float(getattr(self, "tMax", 0.0)) - float(getattr(self, "tMin", 0.0)), 0.0)
         if full_width <= 0:
@@ -78,66 +129,253 @@ class InteractionMixin:
         if not hasattr(self, "sidePanel"):
             return
 
+        assets_dir = Path(__file__).resolve().parent / "assets"
+
         if self.darkMode:
-            text_color = "#f0f0f0"
-            panel_bg = "#2b2b2b"
-            input_bg = "#1f1f1f"
-            border = "#4b4b4b"
-            tab_bg = "#333333"
-            tab_selected_bg = "#1f1f1f"
+            window_bg = "#13161b"
+            text_color = "#e7ecf3"
+            muted_text = "#99a5b6"
+            panel_bg = "#1b2028"
+            panel_alt_bg = "#232934"
+            input_bg = "#151922"
+            border = "#303846"
+            border_strong = "#465165"
+            tab_bg = "#222834"
+            tab_selected_bg = "#171b23"
+            button_bg = "#262d39"
+            button_hover = "#2e3745"
+            button_pressed = "#1f2631"
+            button_text = "#dce5f2"
+            button_border = "#3b4657"
+            checkbox_bg = "#171c24"
+            accent = "#6f94d6"
+            accent_soft = "#263a57"
+            slider_groove = "#252c37"
+            slider_subpage = "#5f83c5"
+            slider_handle = "#dde5f1"
+            slider_handle_border = "#8097ba"
+            combo_arrow = (assets_dir / "combo_arrow_light.svg").as_posix()
+            splitter_handle = "#2a313d"
+            splitter_handle_hover = "#3b4555"
         else:
-            text_color = "#202020"
-            panel_bg = "#f6f6f6"
+            window_bg = "#edf1f5"
+            text_color = "#1f2936"
+            muted_text = "#2e3c4d"
+            panel_bg = "#f7f9fb"
+            panel_alt_bg = "#eef2f6"
             input_bg = "#ffffff"
-            border = "#bdbdbd"
-            tab_bg = "#ebebeb"
+            border = "#ccd5df"
+            border_strong = "#b2bfcd"
+            tab_bg = "#e9eef4"
             tab_selected_bg = "#ffffff"
+            button_bg = "#f2f5f8"
+            button_hover = "#e8edf3"
+            button_pressed = "#dde5ee"
+            button_text = "#223041"
+            button_border = "#c5d0db"
+            checkbox_bg = "#ffffff"
+            accent = "#466b9f"
+            accent_soft = "#dde7f4"
+            slider_groove = "#d7dee6"
+            slider_subpage = "#6d8fbe"
+            slider_handle = "#ffffff"
+            slider_handle_border = "#9fb0c3"
+            combo_arrow = (assets_dir / "combo_arrow_dark.svg").as_posix()
+            splitter_handle = "#d6dde6"
+            splitter_handle_hover = "#bcc8d4"
 
         style = f"""
+            QMainWindow {{
+                background: {window_bg};
+            }}
             QWidget {{
                 color: {text_color};
             }}
             QGroupBox {{
                 color: {text_color};
+                background: {panel_bg};
+                border: 1px solid {border};
+                border-radius: 8px;
+                margin-top: 1.05em;
+                padding-top: 8px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: {muted_text};
+                background: {panel_bg};
+                letter-spacing: 0.04em;
             }}
             QLabel {{
                 color: {text_color};
             }}
+            QTabWidget {{
+                background: transparent;
+            }}
             QTabWidget::pane {{
                 border: 1px solid {border};
+                border-radius: 10px;
                 background: {panel_bg};
+                top: -1px;
+            }}
+            QWidget#sidePanelDock {{
+                background: {panel_bg};
+            }}
+            QWidget#sidebarRail {{
+                background: {panel_alt_bg};
+                border-right: 1px solid {border};
             }}
             QTabBar::tab {{
                 background: {tab_bg};
                 color: {text_color};
                 border: 1px solid {border};
-                padding: 6px 10px;
+                border-top-left-radius: 7px;
+                border-top-right-radius: 7px;
+                padding: 7px 13px;
+                margin-right: 4px;
             }}
             QTabBar::tab:selected {{
                 background: {tab_selected_bg};
+                border-color: {border_strong};
+                font-weight: 600;
+            }}
+            QPushButton {{
+                color: {button_text};
+                background: {button_bg};
+                border: 1px solid {button_border};
+                border-radius: 7px;
+                padding: 7px 12px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background: {button_hover};
+            }}
+            QPushButton:pressed {{
+                background: {button_pressed};
+            }}
+            QPushButton#primaryButton {{
+                color: white;
+                background: {accent};
+                border-color: {accent};
+                font-weight: 600;
+            }}
+            QPushButton#primaryButton:hover {{
+                background: {slider_subpage};
+            }}
+            QPushButton#primaryButton:pressed {{
+                background: {button_pressed};
+            }}
+            QPushButton#modeToggleButton:checked {{
+                background: {accent_soft};
+                border-color: {accent};
+                color: {text_color};
+                font-weight: 600;
+            }}
+            QPushButton#sidebarToggleButton {{
+                min-width: 22px;
+                max-width: 22px;
+                padding: 0;
+                border-radius: 6px;
+                font-weight: 600;
             }}
             QLineEdit, QDoubleSpinBox, QComboBox {{
                 color: {text_color};
                 background: {input_bg};
                 border: 1px solid {border};
+                border-radius: 7px;
+                padding: 6px 9px;
                 selection-background-color: #3a7bd5;
                 selection-color: #ffffff;
+            }}
+            QLineEdit:focus, QDoubleSpinBox:focus, QComboBox:focus {{
+                border: 1px solid {accent};
+                background: {input_bg};
             }}
             QAbstractSpinBox {{
                 color: {text_color};
                 background: {input_bg};
                 border: 1px solid {border};
+                border-radius: 7px;
+            }}
+            QComboBox {{
+                padding-right: 30px;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 28px;
+                border-left: 1px solid {border};
+                background: {panel_alt_bg};
+                border-top-right-radius: 7px;
+                border-bottom-right-radius: 7px;
+            }}
+            QComboBox::down-arrow {{
+                image: url("{combo_arrow}");
+                width: 10px;
+                height: 6px;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {input_bg};
+                color: {text_color};
+                border: 1px solid {border_strong};
+                selection-background-color: {accent};
+                selection-color: white;
+            }}
+            QSlider::groove:horizontal {{
+                height: 10px;
+                background: {slider_groove};
+                border-radius: 5px;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {slider_subpage};
+                border-radius: 5px;
+            }}
+            QSlider::add-page:horizontal {{
+                background: {slider_groove};
+                border-radius: 5px;
+            }}
+            QSlider::handle:horizontal {{
+                width: 18px;
+                background: {slider_handle};
+                border: 1px solid {slider_handle_border};
+                border-radius: 9px;
+                margin: -6px 0;
+            }}
+            QSlider::handle:horizontal:hover {{
+                border-color: {accent};
             }}
             QScrollArea, QListWidget, QListView {{
                 background: {panel_bg};
                 border: 1px solid {border};
+                border-radius: 8px;
+            }}
+            QSplitter::handle {{
+                background: {splitter_handle};
+            }}
+            QSplitter::handle:hover {{
+                background: {splitter_handle_hover};
+            }}
+            QSplitter::handle:horizontal {{
+                width: 6px;
             }}
             QCheckBox {{
                 color: {text_color};
             }}
+            QCheckBox::indicator {{
+                width: 18px;
+                height: 18px;
+                border-radius: 5px;
+                border: 1px solid {border_strong};
+                background: {checkbox_bg};
+            }}
+            QCheckBox::indicator:checked {{
+                background: {accent};
+                border-color: {accent};
+            }}
         """
 
-        self.sidePanel.setStyleSheet(style)
+        self.setStyleSheet(style)
         if hasattr(self, "channelListWidget"):
             self.channelListWidget.setStyleSheet(f"background: {panel_bg}; color: {text_color};")
 
@@ -375,7 +613,7 @@ class InteractionMixin:
         if max_gradient_mt_per_m is None:
             self.maxGradientStrengthValue.setText("-")
         else:
-            self.maxGradientStrengthValue.setText(f"{max_gradient_mt_per_m:.6f} mT/m")
+            self.maxGradientStrengthValue.setText(f"{max_gradient_mt_per_m:.3f} mT/m")
         if hasattr(self, "refresh_channel_checkbox_labels"):
             self.refresh_channel_checkbox_labels()
 

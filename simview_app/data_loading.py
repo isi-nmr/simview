@@ -182,7 +182,7 @@ class DataLoadingMixin:
         self.channels = [channel for channel in self.channels if not self.is_zero_channel(channel)]
 
         if not self.channels:
-            self.sidePanel.hide()
+            self.set_sidebar_available(False)
             progress.close()
             return
 
@@ -194,7 +194,7 @@ class DataLoadingMixin:
         self.sliderScaler = max((self.tMax - self.tMin) / self.tSlider.maximum(), 1e-12)
 
         self.registerCheckBoxes()
-        self.sidePanel.show()
+        self.set_sidebar_available(True)
 
         self.tPos = float(self.settings.value("tPos", self.tMax / 2))
         self.windowWidth = float(self.settings.value("windowWidth", self.tMax / 2))
