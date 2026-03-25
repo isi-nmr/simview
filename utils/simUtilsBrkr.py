@@ -64,6 +64,23 @@ def _find_xml_attr(line: bytes, key: bytes) -> bytes | None:
     return line[start:end]
 
 
+def _read_timeunit_from_xml_bytes(xml_path: str) -> float:
+    # Read only the beginning of the file where <pulseprogram ... timeunit=...> is expected.
+    with open(xml_path, "rb") as handle:
+        head = handle.read(2 * 1024 * 1024)
+
+    patterns = [
+        rb'timeunit="([^"]+)"',
+        rb"timeunit='([^']+)'",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, head)
+        if match is not None:
+            return float(match.group(1))
+
+    raise ValueError("Could not detect pulseprogram timeunit in _GCube.xml")
+
+
 def _readGrads_fast_line(
     gcube_path: str,
     progress_callback: Callable[[float, str], None] | None = None,
@@ -85,9 +102,9 @@ def _readGrads_fast_line(
     if token_ev_count > line_ev_count * 1.05:
         raise ValueError("GCube XML is not line-oriented enough for fast parser")
 
+    t_unit = _read_timeunit_from_xml_bytes(gcube_path)
     t = np.zeros(line_ev_count, dtype=float)
     grads = np.zeros((3, line_ev_count), dtype=float)
-    t_unit = None
 
     progress_step = max(line_ev_count // 200, 1)
     parsed_lines = 0
@@ -95,11 +112,6 @@ def _readGrads_fast_line(
     with open(gcube_path, "rb") as handle:
         for raw_line in handle:
             stripped = raw_line.lstrip()
-            if t_unit is None and stripped.startswith(b"<pulseprogram"):
-                raw_timeunit = _find_xml_attr(stripped, b'timeunit="')
-                if raw_timeunit is not None:
-                    t_unit = float(raw_timeunit)
-
             if not stripped.startswith(b"<ev"):
                 continue
 
@@ -119,8 +131,7 @@ def _readGrads_fast_line(
             if g2 is None or g3 is None or tv is None:
                 continue
 
-            unit = 1.0 if t_unit is None else t_unit
-            t[grad_index] = float(tv) * unit
+            t[grad_index] = float(tv) * t_unit
             grads[:, grad_index] = [float(g1), float(g2), float(g3)]
             grad_index += 1
 
