@@ -33,6 +33,11 @@ class BrukerLoadWorker(QObject):
 
 
 class DataLoadingMixin:
+    def is_calculated_channel(self, channel: list[dict]) -> bool:
+        if not channel:
+            return False
+        return str(channel[0].get("type", "")).endswith("_derived")
+
     def get_channel_checkbox_key(self, channel: list[dict]) -> str:
         return str(channel[0].get("chanLabel", ""))
 
@@ -289,6 +294,21 @@ class DataLoadingMixin:
                 if widget is not None:
                     widget.deleteLater()
 
+        self.channelSections = {}
+        recorded_group = QtWidgets.QGroupBox("Recorded Channels")
+        recorded_layout = QtWidgets.QVBoxLayout(recorded_group)
+        recorded_layout.setContentsMargins(10, 12, 10, 10)
+        recorded_layout.setSpacing(6)
+        self.channelListLayout.addWidget(recorded_group)
+        self.channelSections["recorded"] = recorded_group
+
+        calculated_group = QtWidgets.QGroupBox("Calculated Channels")
+        calculated_layout = QtWidgets.QVBoxLayout(calculated_group)
+        calculated_layout.setContentsMargins(10, 12, 10, 10)
+        calculated_layout.setSpacing(6)
+        self.channelListLayout.addWidget(calculated_group)
+        self.channelSections["calculated"] = calculated_group
+
         for channel in self.channels:
             checkBox = QtWidgets.QCheckBox()
             channel_key = self.get_channel_checkbox_key(channel)
@@ -299,8 +319,12 @@ class DataLoadingMixin:
                 default_show = channel_key in self.selectedChannels
             checkBox.setChecked(default_show)
             checkBox.stateChanged.connect(self.checkBoxChanged)
-            self.channelListLayout.addWidget(checkBox)
+            target_layout = calculated_layout if self.is_calculated_channel(channel) else recorded_layout
+            target_layout.addWidget(checkBox)
             self.checkBoxes.append(checkBox)
+
+        recorded_group.setVisible(recorded_layout.count() > 0)
+        calculated_group.setVisible(calculated_layout.count() > 0)
 
     def update_channel_checkbox_state(self, checkBox: QtWidgets.QCheckBox) -> None:
         if not hasattr(checkBox, "contID"):
@@ -331,6 +355,13 @@ class DataLoadingMixin:
         for checkBox in self.checkBoxes:
             matches = filter_text in checkBox.text().lower()
             checkBox.setVisible(matches)
+        for group_box in getattr(self, "channelSections", {}).values():
+            visible_children = any(
+                isinstance(group_box.layout().itemAt(index).widget(), QtWidgets.QCheckBox)
+                and group_box.layout().itemAt(index).widget().isVisible()
+                for index in range(group_box.layout().count())
+            )
+            group_box.setVisible(visible_children)
 
     def setAllChannels(self, *, visible: bool) -> None:
         changed = False
