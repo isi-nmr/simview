@@ -8,7 +8,7 @@ def makePens()->tuple[list, dict]:
     penR = pg.mkPen(color=(240, 0, 0), width=1.5)
     penG = pg.mkPen(color=(0, 240, 0), width=1.5)
     penB = pg.mkPen(color=(0, 0, 240), width=1.5)
-    penY = pg.mkPen(color=(200, 200, 0), width=1.5)
+    penY = pg.mkPen(color=(145, 125, 0), width=1.5)
     penC = pg.mkPen(color=(0, 200, 200), width=1.5)  # Cyan
     penM = pg.mkPen(color=(200, 0, 200), width=1.5)  # Magenta
     penO = pg.mkPen(color=(255, 128, 0), width=1.5)  # Orange

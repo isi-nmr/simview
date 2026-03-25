@@ -66,6 +66,74 @@ class InteractionMixin:
         else:
             pg.setConfigOption("background", "white")
             pg.setConfigOption("foreground", "black")
+        self.apply_widget_theme_styles()
+
+    def apply_widget_theme_styles(self) -> None:
+        if not hasattr(self, "sidePanel"):
+            return
+
+        if self.darkMode:
+            text_color = "#f0f0f0"
+            panel_bg = "#2b2b2b"
+            input_bg = "#1f1f1f"
+            border = "#4b4b4b"
+            tab_bg = "#333333"
+            tab_selected_bg = "#1f1f1f"
+        else:
+            text_color = "#202020"
+            panel_bg = "#f6f6f6"
+            input_bg = "#ffffff"
+            border = "#bdbdbd"
+            tab_bg = "#ebebeb"
+            tab_selected_bg = "#ffffff"
+
+        style = f"""
+            QWidget {{
+                color: {text_color};
+            }}
+            QGroupBox {{
+                color: {text_color};
+            }}
+            QLabel {{
+                color: {text_color};
+            }}
+            QTabWidget::pane {{
+                border: 1px solid {border};
+                background: {panel_bg};
+            }}
+            QTabBar::tab {{
+                background: {tab_bg};
+                color: {text_color};
+                border: 1px solid {border};
+                padding: 6px 10px;
+            }}
+            QTabBar::tab:selected {{
+                background: {tab_selected_bg};
+            }}
+            QLineEdit, QDoubleSpinBox, QComboBox {{
+                color: {text_color};
+                background: {input_bg};
+                border: 1px solid {border};
+                selection-background-color: #3a7bd5;
+                selection-color: #ffffff;
+            }}
+            QAbstractSpinBox {{
+                color: {text_color};
+                background: {input_bg};
+                border: 1px solid {border};
+            }}
+            QScrollArea, QListWidget, QListView {{
+                background: {panel_bg};
+                border: 1px solid {border};
+            }}
+            QCheckBox {{
+                color: {text_color};
+            }}
+        """
+
+        self.sidePanel.setStyleSheet(style)
+        if hasattr(self, "channelListWidget"):
+            self.channelListWidget.setStyleSheet(f"background: {panel_bg}; color: {text_color};")
 
     def update_existing_plot_themes(self) -> None:
         for plot in getattr(self, "plots", []):

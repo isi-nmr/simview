@@ -520,7 +520,7 @@ def build_pulse_program_event_annotations(
             "name": "ppg_events",
             "t": np.asarray(event_times, dtype=float),
             "texts": event_texts,
-            "color": "y",
+            "color": "#8a7600",
         },
     ]
 
