@@ -8,6 +8,7 @@ from simView import PROTON_GAMMA_MHZ_PER_T, GUIapp
 from utils import multiplot
 from utils.simUtilsBrkr import (
     build_pulse_program_event_annotations,
+    bruker_pw_attenuation_db_to_watts,
     getRFEvents,
     readBrkrChannels,
     read_all_fcube_event_infos,
@@ -98,6 +99,16 @@ def test_read_bruker_channels_from_fixture_loads_gradients_and_ncos(bruker_fixtu
     nco_keys = {channel[0]["key"] for channel in channels[:-1]}
     assert "am" in nco_keys
     assert "pw" in nco_keys
+    pw_line = next(channel[0] for channel in channels[:-1] if channel[0]["key"] == "pw")
+    assert pw_line["units"] == "W"
+    assert pw_line["raw_units"] == "dB"
+    assert "raw_data" in pw_line
+    np.testing.assert_allclose(
+        pw_line["data"],
+        bruker_pw_attenuation_db_to_watts(np.asarray(pw_line["raw_data"], dtype=float), reference_watts=1.0),
+        rtol=1e-12,
+        atol=1e-12,
+    )
 
 
 def test_read_bruker_channels_keeps_gradient_raw_data_copies(bruker_fixture_path: Path) -> None:
@@ -176,6 +187,19 @@ def test_build_nco_power_derived_channels_merges_event_times(app_logic: GUIapp) 
     np.testing.assert_allclose(output_power["data"], np.array([0.0, 5.0, 5.0, 40.0]))
     np.testing.assert_allclose(energy["data"], np.array([0.0, 0.0, 5.0, 10.0]))
     np.testing.assert_allclose(average_power["data"], np.array([0.0, 0.0, 1.66666667, 2.5]), rtol=1e-7, atol=1e-7)
+
+
+def test_bruker_pw_attenuation_db_to_watts_converts_from_db() -> None:
+    attenuation_db = np.array([0.0, 3.0, 10.0, 20.0])
+    watts = bruker_pw_attenuation_db_to_watts(attenuation_db, reference_watts=1.0)
+    expected = np.array([1.0, 10 ** (-0.3), 0.1, 0.01])
+    np.testing.assert_allclose(watts, expected, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        bruker_pw_attenuation_db_to_watts(np.array([10.0]), reference_watts=100.0),
+        np.array([10.0]),
+        rtol=1e-12,
+        atol=1e-12,
+    )
 
 
 def test_gradient_scaling_uses_configured_gamma_for_mt_per_m(app_logic: GUIapp) -> None:

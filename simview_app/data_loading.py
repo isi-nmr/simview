@@ -16,17 +16,22 @@ class BrukerLoadWorker(QObject):
     failed = pyqtSignal(int, str)
     progress = pyqtSignal(int, int, str)
 
-    def __init__(self, path: str, load_id: int) -> None:
+    def __init__(self, path: str, load_id: int, pw_reference_watts: float) -> None:
         super().__init__()
         self.path = path
         self.load_id = load_id
+        self.pw_reference_watts = pw_reference_watts
 
     def run(self) -> None:
         try:
             def emit_progress(value: int, label: str) -> None:
                 self.progress.emit(self.load_id, value, label)
 
-            channels, info = parseBrkrChannels(self.path, progress_callback=emit_progress)
+            channels, info = parseBrkrChannels(
+                self.path,
+                progress_callback=emit_progress,
+                pw_reference_watts=self.pw_reference_watts,
+            )
             self.finished.emit(self.load_id, channels, info)
         except Exception as exc:
             self.failed.emit(self.load_id, str(exc))
@@ -208,6 +213,14 @@ class DataLoadingMixin:
         self.windowWidth = float(self.settings.value("windowWidth", self.tMax / 2))
 
         self.initPlots()
+
+        # If a stale filter hides all channel checkboxes after reload, reset it
+        # so channel selectors stay discoverable. Use hidden-state instead of
+        # isVisible(), because reload can occur while Settings tab is active.
+        if self.checkBoxes and not any(not check_box.isHidden() for check_box in self.checkBoxes):
+            self.channelFilter.clear()
+            self.filterChannels()
+
         progress.setValue(90)
         progress.close()
 
@@ -225,7 +238,11 @@ class DataLoadingMixin:
         self._loadProgress = progress
 
         self._brukerLoadThread = QThread(self)
-        self._brukerLoadWorker = BrukerLoadWorker(path, load_id)
+        self._brukerLoadWorker = BrukerLoadWorker(
+            path,
+            load_id,
+            float(getattr(self, "brukerPwReferenceWatts", 1.0)),
+        )
         self._brukerLoadWorker.moveToThread(self._brukerLoadThread)
 
         self._brukerLoadThread.started.connect(self._brukerLoadWorker.run)
@@ -287,6 +304,7 @@ class DataLoadingMixin:
         )
 
     def registerCheckBoxes(self) -> None:
+        self.checkBoxes = []
         if hasattr(self, "channelListLayout"):
             while self.channelListLayout.count():
                 item = self.channelListLayout.takeAt(0)
@@ -358,7 +376,7 @@ class DataLoadingMixin:
         for group_box in getattr(self, "channelSections", {}).values():
             visible_children = any(
                 isinstance(group_box.layout().itemAt(index).widget(), QtWidgets.QCheckBox)
-                and group_box.layout().itemAt(index).widget().isVisible()
+                and not group_box.layout().itemAt(index).widget().isHidden()
                 for index in range(group_box.layout().count())
             )
             group_box.setVisible(visible_children)
@@ -369,7 +387,7 @@ class DataLoadingMixin:
         unblock_signals = False
         self.sidePanel.setUpdatesEnabled(False)
         for checkBox in self.checkBoxes:
-            if not checkBox.isVisible():
+            if checkBox.isHidden():
                 continue
             if checkBox.isChecked() == visible:
                 continue

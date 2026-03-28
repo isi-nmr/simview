@@ -743,18 +743,6 @@ class InteractionMixin:
         if hasattr(self, "refresh_channel_checkbox_labels"):
             self.refresh_channel_checkbox_labels()
 
-    def rebuild_loaded_channels(self) -> None:
-        if not self.channels:
-            return
-        self.channels = [
-            channel
-            for channel in self.channels
-            if channel[0].get("type") not in {"grads_derived", "nco_derived"}
-        ]
-        self.update_gradient_channels()
-        self.channels.extend(self.build_gradient_derived_channels())
-        self.channels.extend(self.build_nco_power_derived_channels())
-
     def reload_current_data(self) -> None:
         if self.dataPath is not None:
             self.loadData()
@@ -765,11 +753,13 @@ class InteractionMixin:
         self.themeMode = self.themeModeComboBox.currentData()
         self.gradientCalibrationHzPerMm = float(self.gradientCalibrationSpinBox.value())
         self.nucleusGammaMHzPerT = float(self.nucleusGammaSpinBox.value())
+        self.brukerPwReferenceWatts = float(self.brukerPwReferenceSpinBox.value())
         self.gradientDisplayUnits = str(self.gradientDisplayUnitsComboBox.currentData() or "hz_per_mm")
         self.derivedSignalStartupPadding = float(self.derivedSignalStartupPaddingSpinBox.value())
         self.settings.setValue("themeMode", self.themeMode)
         self.settings.setValue("gradientCalibrationHzPerMm", self.gradientCalibrationHzPerMm)
         self.settings.setValue("nucleusGammaMHzPerT", self.nucleusGammaMHzPerT)
+        self.settings.setValue("brukerPwReferenceWatts", self.brukerPwReferenceWatts)
         self.settings.setValue("gradientDisplayUnits", self.gradientDisplayUnits)
         self.settings.setValue("derivedSignalStartupPadding", self.derivedSignalStartupPadding)
         self.apply_theme_settings()

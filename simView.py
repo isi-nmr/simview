@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -52,6 +53,7 @@ class GUIapp(
         self.gradientCalibrationHzPerMm = 0.0
         self.nucleusGammaMHzPerT = PROTON_GAMMA_MHZ_PER_T
         self.gradientDisplayUnits = "hz_per_mm"
+        self.brukerPwReferenceWatts = 1.0
         self.themeMode = "system"
         self.trajectoryZeroReferenceTime: float | None = None
         self.derivedSignalStartupPadding = 0.010
@@ -177,6 +179,18 @@ class GUIapp(
         self.snapMeasureAction.setChecked(self.measureSnapToEvents)
         self.gradientCalibrationHzPerMm = float(self.settings.value("gradientCalibrationHzPerMm", 0.0, type=float))
         self.nucleusGammaMHzPerT = float(self.settings.value("nucleusGammaMHzPerT", PROTON_GAMMA_MHZ_PER_T, type=float))
+        env_pw_reference = os.getenv("SIMVIEW_BRUKER_PW_REF_W", "1.0")
+        try:
+            default_pw_reference = float(env_pw_reference)
+        except ValueError:
+            default_pw_reference = 1.0
+        if default_pw_reference <= 0:
+            default_pw_reference = 1.0
+        self.brukerPwReferenceWatts = float(
+            self.settings.value("brukerPwReferenceWatts", default_pw_reference, type=float),
+        )
+        if self.brukerPwReferenceWatts <= 0:
+            self.brukerPwReferenceWatts = default_pw_reference
         stored_gradient_display_units = self.settings.value("gradientDisplayUnits", None)
         if stored_gradient_display_units in {None, ""}:
             legacy_display_mt_per_m = bool(
@@ -319,6 +333,13 @@ class GUIapp(
         self.nucleusGammaSpinBox.setSuffix(" MHz/T")
         self.nucleusGammaSpinBox.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.nucleusGammaSpinBox.setValue(self.nucleusGammaMHzPerT)
+        self.brukerPwReferenceSpinBox = QtWidgets.QDoubleSpinBox()
+        self.brukerPwReferenceSpinBox.setDecimals(6)
+        self.brukerPwReferenceSpinBox.setRange(1e-9, 1_000_000_000.0)
+        self.brukerPwReferenceSpinBox.setSingleStep(0.1)
+        self.brukerPwReferenceSpinBox.setSuffix(" W")
+        self.brukerPwReferenceSpinBox.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.brukerPwReferenceSpinBox.setValue(self.brukerPwReferenceWatts)
         self.maxGradientStrengthValue = QtWidgets.QLineEdit()
         self.maxGradientStrengthValue.setReadOnly(True)
         self.derivedSignalStartupPaddingSpinBox = QtWidgets.QDoubleSpinBox()
@@ -346,7 +367,8 @@ class GUIapp(
         scannerGroupLayout = QtWidgets.QVBoxLayout(scannerGroup)
         scannerLayout = QtWidgets.QFormLayout()
         self.scannerSettingsHint = QtWidgets.QLabel(
-            "Gradient channels are loaded in percent. Enter calibration at 100% to scale them to Hz/mm."
+            "Gradient channels are loaded in percent. Bruker pw channels are attenuation in dB and use the "
+            "reference power for W conversion."
         )
         self.scannerSettingsHint.setWordWrap(True)
         self.scannerSettingsHint.setSizePolicy(
@@ -356,6 +378,7 @@ class GUIapp(
         scannerGroupLayout.addWidget(self.scannerSettingsHint)
         scannerLayout.addRow("Grad Calibration", self.gradientCalibrationSpinBox)
         scannerLayout.addRow("Nucleus Gamma", self.nucleusGammaSpinBox)
+        scannerLayout.addRow("Bruker PW Ref", self.brukerPwReferenceSpinBox)
         scannerLayout.addRow("Max Grad @ 100%", self.maxGradientStrengthValue)
         scannerLayout.addRow("Gradient Display", self.gradientDisplayUnitsComboBox)
         scannerGroupLayout.addLayout(scannerLayout)

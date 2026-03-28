@@ -13,6 +13,23 @@ except ImportError:  # pragma: no cover - optional dependency
     LET = None
 
 
+def _get_bruker_pw_reference_watts() -> float:
+    raw = os.getenv("SIMVIEW_BRUKER_PW_REF_W", "1.0").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 1.0
+    if value <= 0:
+        return 1.0
+    return value
+
+
+def bruker_pw_attenuation_db_to_watts(attenuation_db: np.ndarray | float, reference_watts: float) -> np.ndarray:
+    att = np.asarray(attenuation_db, dtype=float)
+    # Bruker "pw" is attenuation in dB, so linear power scales by 10^(-dB/10).
+    return reference_watts * np.power(10.0, -att / 10.0)
+
+
 def getGradEvents(dict: dict) -> tuple[np.ndarray, np.ndarray]:
     events = dict["pulseprogram"]["ev"]
     if isinstance(events, Mapping):
@@ -531,6 +548,7 @@ def build_pulse_program_event_annotations(
 def parseBrkrChannels(
     path: str,
     progress_callback: Callable[[int, str], None] | None = None,
+    pw_reference_watts: float | None = None,
 ) -> tuple[list[list[dict]], dict[str, object]]:
     last_progress_value = 0
 
@@ -559,6 +577,8 @@ def parseBrkrChannels(
 
     emit_progress(55, "Parsing FCube event files")
     channels = []
+    if pw_reference_watts is None or pw_reference_watts <= 0:
+        pw_reference_watts = _get_bruker_pw_reference_watts()
     event_infos = [dict(info, fcube="_FCube1")]
     event_infos.extend(read_all_fcube_event_infos(
         path,
@@ -601,6 +621,12 @@ def parseBrkrChannels(
                 "data": ncos[nco][key],
                 "annotations": [],
             }
+            if key == "pw":
+                raw_pw_db = np.asarray(ncos[nco][key], dtype=float)
+                channelDes["raw_data"] = raw_pw_db.copy()
+                channelDes["raw_units"] = "dB"
+                channelDes["units"] = "W"
+                channelDes["data"] = bruker_pw_attenuation_db_to_watts(raw_pw_db, pw_reference_watts)
 
             if key == "am":
                 sf = ncos[nco]["sf"]
@@ -702,7 +728,7 @@ def parseBrkrChannels(
     return channels, info
 
 
-def readBrkrChannels(path: str, progress=None, app=None) -> dict:
+def readBrkrChannels(path: str, progress=None, app=None, pw_reference_watts: float | None = None) -> dict:
     if progress is not None:
         progress.setLabelText("Reading RF Events")
         if hasattr(progress, "wasCanceled") and progress.wasCanceled():
@@ -714,7 +740,19 @@ def readBrkrChannels(path: str, progress=None, app=None) -> dict:
         progress.setValue(value)
         progress.setLabelText(label)
 
-    channels, info = parseBrkrChannels(path, progress_callback=_progress)
+    if pw_reference_watts is None and app is not None and hasattr(app, "brukerPwReferenceWatts"):
+        try:
+            candidate = float(getattr(app, "brukerPwReferenceWatts"))
+            if candidate > 0:
+                pw_reference_watts = candidate
+        except (TypeError, ValueError):
+            pw_reference_watts = None
+
+    channels, info = parseBrkrChannels(
+        path,
+        progress_callback=_progress,
+        pw_reference_watts=pw_reference_watts,
+    )
 
     if app is not None:
         app.setWindowTitle(f"{path} originPPG: {info['pulProg']}")
