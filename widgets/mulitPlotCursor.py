@@ -536,6 +536,12 @@ class CursorPlot(pg.PlotWidget):
         shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
         main_window = self.get_main_window()
 
+        # Never use RMB for zoom selection; also clear any stale temporary zoom box.
+        if event.button() != Qt.MouseButton.LeftButton and self.zoom_region_temp is not None:
+            self.removeItem(self.zoom_region_temp)
+            self.zoom_region_temp = None
+            self.zoom_start_x = None
+
         if self.measure_mode:
             shared_start_x = getattr(main_window, "measurement_start_x", None) if main_window is not None else self.start_x
             if shared_start_x is None:
@@ -571,7 +577,7 @@ class CursorPlot(pg.PlotWidget):
                             continue
                         other.measure_mode = False
 
-        elif self.zoom_mode or shift_pressed:
+        elif (self.zoom_mode or shift_pressed) and event.button() == Qt.MouseButton.LeftButton:
             self.zoom_start_x = mouse_point.x()
             # create temporary region
             self.zoom_region_temp = pg.LinearRegionItem(
@@ -722,7 +728,11 @@ class CursorPlot(pg.PlotWidget):
             self.notify_measurement(delta_t)
 
     def mouseReleaseEvent(self, event:QMouseEvent)->None:
-        if self.zoom_start_x is not None and self.zoom_region_temp is not None:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.zoom_start_x is not None
+            and self.zoom_region_temp is not None
+        ):
             # finalize zoom
             start, end = self.zoom_region_temp.getRegion()
             if start != end:

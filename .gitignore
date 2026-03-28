@@ -5,3 +5,4 @@ __*
 .ruff_cache
 .venv
 testData
+.codex
