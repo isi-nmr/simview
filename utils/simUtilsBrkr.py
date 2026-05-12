@@ -30,6 +30,181 @@ def bruker_pw_attenuation_db_to_watts(attenuation_db: np.ndarray | float, refere
     return reference_watts * np.power(10.0, -att / 10.0)
 
 
+def _is_rgp_active(value: object) -> bool:
+    text = str(value).strip().lower()
+    if not text:
+        return False
+
+    if "x" in text:
+        try:
+            return int(text.rsplit("x", 1)[1], 16) != 0
+        except ValueError:
+            return False
+
+    normalized = re.sub(r"[^0-9a-f]", "", text)
+    if not normalized:
+        return False
+    try:
+        return int(normalized, 16) != 0
+    except ValueError:
+        return False
+
+
+def _is_acquisition_end_event(event: Mapping[str, object]) -> bool:
+    return any(key in event for key in ("wr", "if", "df", "rf"))
+
+
+def _is_sample_acquisition_end_event(event: Mapping[str, object]) -> bool:
+    return str(event.get("ln", "")) == "10000001"
+
+
+def read_fcube_job_line_map(path: str, fcube_stem: str) -> dict[str, str]:
+    output_path = Path(path) / f"{fcube_stem}.output"
+    if not output_path.exists():
+        return {}
+
+    job_line_map: dict[str, str] = {}
+    line_pattern = re.compile(r"^\s*(\d+)\s+\".*?_job(\d+)")
+    with output_path.open(errors="replace") as handle:
+        for line in handle:
+            match = line_pattern.search(line)
+            if match is not None:
+                job_line_map[match.group(1)] = match.group(2)
+
+    return job_line_map
+
+
+def annotate_fcube_event_jobs(info: dict[str, object], job_line_map: Mapping[str, str]) -> None:
+    events = info.get("events", [])
+    if not isinstance(events, list) or not job_line_map:
+        return
+
+    current_job: str | None = None
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        line_number = str(event.get("ln", ""))
+        if line_number in job_line_map:
+            current_job = job_line_map[line_number]
+            event["job"] = current_job
+        elif current_job is not None and ("rgp" in event or str(event.get("ln", "")) == "10000001"):
+            event["job"] = current_job
+
+
+def _extract_windows_from_events(
+    events: list[dict[str, object]],
+    end_event_predicate: Callable[[Mapping[str, object]], bool],
+) -> dict[str, list[tuple[float, float]]]:
+    starts_by_key: dict[tuple[str, str | None], list[float]] = {}
+    end_times_by_key: dict[tuple[str | None], list[float]] = {}
+    saw_job = False
+
+    for event in events:
+        if "t" not in event:
+            continue
+        event_time = float(event["t"])
+        job = str(event["job"]) if "job" in event else None
+        if job is not None:
+            saw_job = True
+        if "rgp" in event and _is_rgp_active(event["rgp"]):
+            nco = str(event.get("nco", "1"))
+            starts_by_key.setdefault((nco, job), []).append(event_time)
+        if end_event_predicate(event):
+            end_times_by_key.setdefault((job,), []).append(event_time)
+
+    if not starts_by_key or not end_times_by_key:
+        return {}
+
+    windows_by_nco: dict[str, list[tuple[float, float]]] = {}
+    for (nco, job), starts in starts_by_key.items():
+        starts = sorted(starts)
+        sorted_ends = sorted(end_times_by_key.get((job,), []))
+        if not sorted_ends and not saw_job:
+            sorted_ends = sorted(end_time for end_times in end_times_by_key.values() for end_time in end_times)
+        if not sorted_ends:
+            continue
+        end_index = 0
+        windows: list[tuple[float, float]] = []
+        durations: list[float] = []
+
+        for start_index, start_time in enumerate(starts):
+            next_start = starts[start_index + 1] if start_index + 1 < len(starts) else None
+            while end_index < len(sorted_ends) and sorted_ends[end_index] <= start_time:
+                end_index += 1
+
+            if end_index < len(sorted_ends) and (next_start is None or sorted_ends[end_index] < next_start):
+                end_time = sorted_ends[end_index]
+                windows.append((start_time, end_time))
+                durations.append(end_time - start_time)
+                end_index += 1
+            elif durations:
+                windows.append((start_time, start_time + float(np.median(durations))))
+
+        if windows:
+            windows_by_nco.setdefault(nco, []).extend(windows)
+
+    for nco, windows in windows_by_nco.items():
+        windows_by_nco[nco] = sorted(windows)
+
+    return windows_by_nco
+
+
+def extract_acquisition_windows(event_infos: list[dict[str, object]]) -> dict[str, list[tuple[float, float]]]:
+    return extract_best_windows(event_infos, _is_acquisition_end_event)
+
+
+def extract_sample_acquisition_windows(event_infos: list[dict[str, object]]) -> dict[str, list[tuple[float, float]]]:
+    return extract_best_windows(event_infos, _is_sample_acquisition_end_event)
+
+
+def extract_best_windows(
+    event_infos: list[dict[str, object]],
+    end_event_predicate: Callable[[Mapping[str, object]], bool],
+) -> dict[str, list[tuple[float, float]]]:
+    best_windows: dict[str, list[tuple[float, float]]] = {}
+    best_count = 0
+
+    for info in event_infos:
+        events = info.get("events", [])
+        if not isinstance(events, list):
+            continue
+        windows = _extract_windows_from_events(events, end_event_predicate)
+        window_count = sum(len(nco_windows) for nco_windows in windows.values())
+        if window_count > best_count:
+            best_windows = windows
+            best_count = window_count
+
+    return best_windows
+
+
+def apply_windows_to_nco_gate(
+    ncos: dict,
+    windows_by_nco: dict[str, list[tuple[float, float]]],
+    key: str,
+) -> None:
+    for nco, windows in windows_by_nco.items():
+        if nco not in ncos or not windows:
+            continue
+
+        times: list[float] = []
+        values: list[float] = []
+        for start_time, end_time in windows:
+            if end_time <= start_time:
+                continue
+            times.extend([float(start_time), float(end_time)])
+            values.extend([1.0, 0.0])
+
+        if not times:
+            continue
+
+        ncos[nco][f"{key}_t"] = np.asarray(times, dtype=float)
+        ncos[nco][key] = np.asarray(values, dtype=float)
+
+
+def apply_acquisition_windows_to_rgp(ncos: dict, acquisition_windows: dict[str, list[tuple[float, float]]]) -> None:
+    apply_windows_to_nco_gate(ncos, acquisition_windows, "rgp")
+
+
 def _gradient_attr_sort_key(attr_name: str) -> int:
     match = re.fullmatch(r"g(\d+)", attr_name)
     if match is None:
@@ -440,7 +615,7 @@ def getRFEvents(
             ncos[ncoNumber]["sf"][ind] = ncos[ncoNumber]["sf"][ind - 1] if ind > 0 else 0
 
         if "@rgp" in event:
-            ncos[ncoNumber]["rgp"][ind] = 1 if "0--0" in event["@rgp"] else 0
+            ncos[ncoNumber]["rgp"][ind] = 1 if _is_rgp_active(event["@rgp"]) else 0
 
         elif "@ln" in event:
             if event["@ln"] == "8000001":
@@ -474,6 +649,7 @@ def readRFEvents(
         gCube = xmltodict.parse(f.read())
 
     ncos, info = getRFEvents(gCube, progress_callback=progress_callback, progress_label=progress_label)
+    annotate_fcube_event_jobs(info, read_fcube_job_line_map(path, "_FCube1"))
 
     return ncos, info
 
@@ -507,6 +683,7 @@ def read_all_fcube_event_infos(
             progress_label=f"Parsing {fcube_path.name}",
         )
         info["fcube"] = fcube_path.stem
+        annotate_fcube_event_jobs(info, read_fcube_job_line_map(path, fcube_path.stem))
         event_infos.append(info)
     if progress_callback is not None:
         progress_callback(1.0, "Parsed FCube files")
@@ -552,6 +729,13 @@ def build_pulse_program_event_annotations(
                 parts.append(f"df={event['df']}")
             if "rf" in event:
                 parts.append(f"rf={event['rf']}")
+            if "rgp" in event:
+                rgp_state = "on" if _is_rgp_active(event["rgp"]) else "off"
+                parts.append(f"rgp={rgp_state}")
+            if _is_sample_acquisition_end_event(event):
+                parts.append("acq=end")
+            if parts and "job" in event:
+                parts.append(f"job={event['job']}")
 
             processed_events += 1
             if progress_callback is not None and (
@@ -640,6 +824,8 @@ def parseBrkrChannels(
         progress_callback=lambda fraction, label: emit_progress(55 + int(20 * fraction), label),
         skip_fcube_stems={"_FCube1"},
     ))
+    apply_acquisition_windows_to_rgp(ncos, extract_acquisition_windows(event_infos))
+    apply_windows_to_nco_gate(ncos, extract_sample_acquisition_windows(event_infos), "acq")
     emit_progress(76, "Building event annotations")
     event_annotations = build_pulse_program_event_annotations(
         event_infos,
@@ -649,13 +835,13 @@ def parseBrkrChannels(
     # Build NCO channels and emit coarse-grained progress for long runs.
     total_nco_channels = 0
     for nco_key in ncos:
-        total_nco_channels += sum(1 for key in ncos[nco_key] if key not in {"t", "sf"})
+        total_nco_channels += sum(1 for key in ncos[nco_key] if key not in {"t", "sf", "rgp_t", "acq_t"})
     built_nco_channels = 0
 
     emit_progress(83, "Preparing NCO channels")
     for nco in ncos:
         for key in ncos[nco]:
-            if key in {"t", "sf"}:
+            if key in {"t", "sf", "rgp_t", "acq_t"}:
                 continue
 
             if re.match(r"p\d", key):
@@ -672,7 +858,7 @@ def parseBrkrChannels(
                 "ind": nco,
                 "key": key,
                 "plotType": plotType,
-                "t": ncos[nco]["t"],
+                "t": ncos[nco].get(f"{key}_t", ncos[nco]["t"]),
                 "data": ncos[nco][key],
                 "annotations": [],
             }

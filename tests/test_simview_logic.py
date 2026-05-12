@@ -7,8 +7,12 @@ import pytest
 from simView import PROTON_GAMMA_MHZ_PER_T, GUIapp
 from utils import multiplot
 from utils.simUtilsBrkr import (
+    annotate_fcube_event_jobs,
+    apply_acquisition_windows_to_rgp,
     build_pulse_program_event_annotations,
     bruker_pw_attenuation_db_to_watts,
+    extract_acquisition_windows,
+    extract_sample_acquisition_windows,
     getRFEvents,
     readGrads,
     readBrkrChannels,
@@ -238,6 +242,147 @@ def test_bruker_pw_attenuation_db_to_watts_converts_from_db() -> None:
         rtol=1e-12,
         atol=1e-12,
     )
+
+
+def test_get_rf_events_treats_zero_rgp_as_inactive() -> None:
+    pulse_program = {
+        "pulseprogram": {
+            "@path": "/tmp/test.ppg",
+            "@timeunit": "1.0",
+            "ev": [
+                {"@t": "0.0", "@nco": "3", "@rgp": "0--0x1"},
+                {"@t": "1.0", "@nco": "3", "@rgp": "0--0"},
+            ],
+        },
+    }
+
+    ncos, _info = getRFEvents(pulse_program)
+
+    np.testing.assert_allclose(ncos["3"]["rgp"], np.array([1.0, 0.0]))
+
+
+def test_extract_acquisition_windows_uses_fcube_write_event_as_end() -> None:
+    event_infos = [
+        {
+            "fcube": "_FCube1",
+            "events": [
+                {"t": 10.0, "nco": "3", "rgp": "0--0x1"},
+                {"t": 10.0001, "nco": "3", "rgp": "0--0"},
+            ],
+        },
+        {
+            "fcube": "_FCube4",
+            "events": [
+                {"t": 10.0, "nco": "3", "rgp": "0--0x1"},
+                {"t": 10.0001, "nco": "3", "rgp": "0--0"},
+                {"t": 11.5, "nco": "0", "wr": "0", "if": "0"},
+                {"t": 20.0, "nco": "3", "rgp": "0--0x1"},
+                {"t": 20.0001, "nco": "3", "rgp": "0--0"},
+            ],
+        },
+    ]
+
+    windows = extract_acquisition_windows(event_infos)
+
+    assert windows == {"3": [(10.0, 11.5), (20.0, 21.5)]}
+
+
+def test_extract_sample_acquisition_windows_uses_internal_dwell_end() -> None:
+    event_infos = [
+        {
+            "fcube": "_FCube4",
+            "events": [
+                {"t": 10.0, "nco": "3", "rgp": "0--0x1", "job": "0"},
+                {"t": 10.0001, "nco": "3", "rgp": "0--0", "job": "0"},
+                {"t": 11.0, "nco": "3", "ln": "10000001", "job": "0"},
+                {"t": 11.5, "nco": "0", "wr": "0", "if": "0", "job": "0"},
+            ],
+        },
+    ]
+
+    windows = extract_sample_acquisition_windows(event_infos)
+
+    assert windows == {"3": [(10.0, 11.0)]}
+
+
+def test_acquisition_windows_match_starts_and_ends_by_job_number() -> None:
+    event_infos = [
+        {
+            "fcube": "_FCube4",
+            "events": [
+                {"t": 10.0, "nco": "3", "rgp": "0--0x1", "job": "0"},
+                {"t": 10.1, "nco": "3", "rgp": "0--0x1", "job": "1"},
+                {"t": 10.2, "nco": "0", "wr": "0", "if": "0", "job": "1"},
+                {"t": 10.3, "nco": "0", "wr": "0", "if": "0", "job": "0"},
+            ],
+        },
+    ]
+
+    windows = extract_acquisition_windows(event_infos)
+
+    assert windows == {"3": [(10.0, 10.3), (10.1, 10.2)]}
+
+
+def test_annotate_fcube_event_jobs_carries_job_to_internal_rgp_events() -> None:
+    info = {
+        "events": [
+            {"t": 1.0, "ln": "1323", "nco": "3"},
+            {"t": 1.1, "ln": "10000000", "nco": "3", "rgp": "0--0x1"},
+            {"t": 1.2, "ln": "1342", "nco": "0", "wr": "0", "if": "0"},
+        ],
+    }
+
+    annotate_fcube_event_jobs(info, {"1323": "0", "1342": "0"})
+
+    assert [event.get("job") for event in info["events"]] == ["0", "0", "0"]
+
+
+def test_build_pulse_program_event_annotations_displays_job() -> None:
+    annotations = build_pulse_program_event_annotations(
+        [
+            {
+                "fcube": "_FCube4",
+                "events": [
+                    {"t": 1.0, "wr": "0", "if": "0", "job": "0"},
+                ],
+            },
+        ],
+    )
+
+    assert annotations[0]["texts"] == ["wr=0 | if=0 | job=0"]
+
+
+def test_build_pulse_program_event_annotations_omits_standalone_job_labels() -> None:
+    annotations = build_pulse_program_event_annotations(
+        [
+            {
+                "fcube": "_FCube4",
+                "events": [
+                    {"t": 1.0, "job": "0"},
+                    {"t": 2.0, "ln": "10000001", "job": "0"},
+                    {"t": 3.0, "rgp": "0--0x1", "job": "0"},
+                ],
+            },
+        ],
+    )
+
+    assert annotations[0]["texts"] == ["acq=end | job=0", "rgp=on | job=0"]
+
+
+def test_apply_acquisition_windows_to_rgp_keeps_nco_timebase() -> None:
+    ncos = {
+        "3": {
+            "t": np.array([0.0, 1.0, 2.0]),
+            "am": np.array([0.0, 1.0, 0.0]),
+            "rgp": np.array([0.0, 0.0, 0.0]),
+        },
+    }
+
+    apply_acquisition_windows_to_rgp(ncos, {"3": [(10.0, 11.5), (20.0, 21.5)]})
+
+    np.testing.assert_allclose(ncos["3"]["t"], np.array([0.0, 1.0, 2.0]))
+    np.testing.assert_allclose(ncos["3"]["rgp_t"], np.array([10.0, 11.5, 20.0, 21.5]))
+    np.testing.assert_allclose(ncos["3"]["rgp"], np.array([1.0, 0.0, 1.0, 0.0]))
 
 
 def test_gradient_scaling_uses_configured_gamma_for_mt_per_m(app_logic: GUIapp) -> None:
@@ -603,7 +748,9 @@ def test_read_all_fcube_event_infos_preserves_all_event_attributes(bruker_fixtur
 
         for xml_event, parsed_event in zip(xml_events, parsed_events, strict=True):
             normalized_expected_keys = set(xml_event.attrib.keys())
-            assert set(parsed_event.keys()) == normalized_expected_keys
+            parsed_keys = set(parsed_event.keys())
+            parsed_keys.discard("job")
+            assert parsed_keys == normalized_expected_keys
 
             if "t" in xml_event.attrib:
                 assert np.isclose(float(parsed_event["t"]), float(xml_event.attrib["t"]) * time_unit)
