@@ -10,6 +10,7 @@ from utils.simUtilsBrkr import (
     build_pulse_program_event_annotations,
     bruker_pw_attenuation_db_to_watts,
     getRFEvents,
+    readGrads,
     readBrkrChannels,
     read_all_fcube_event_infos,
 )
@@ -91,7 +92,14 @@ def test_read_bruker_channels_from_fixture_loads_gradients_and_ncos(bruker_fixtu
 
     gradient_channel = channels[-1]
     assert gradient_channel[0]["chanLabel"] == "Gradients"
-    assert [line["key"] for line in gradient_channel] == ["Gx", "Gy", "Gz"]
+    assert [line["key"] for line in gradient_channel[:3]] == ["Gx", "Gy", "Gz"]
+    extra_gradient_labels = {line.get("source_attr"): line["key"] for line in gradient_channel[3:]}
+    if "g4" in extra_gradient_labels:
+        assert extra_gradient_labels["g4"] == "B0"
+    assert all(
+        key == "B0" if source_attr == "g4" else key == source_attr
+        for source_attr, key in extra_gradient_labels.items()
+    )
     assert all(line["units"] == "%" for line in gradient_channel)
     assert all(line["raw_units"] == "%" for line in gradient_channel)
     assert all(line["t"].size == gradient_channel[0]["t"].size for line in gradient_channel)
@@ -123,6 +131,35 @@ def test_read_bruker_channels_keeps_gradient_raw_data_copies(bruker_fixture_path
         assert "raw_data" in line
         assert not np.shares_memory(line["raw_data"], line["data"])
         np.testing.assert_allclose(line["raw_data"], line["data"])
+
+
+def test_read_grads_supports_extra_gradient_channels(tmp_path: Path) -> None:
+    (tmp_path / "_GCube.xml").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<pulseprogram timeunit="0.001">
+  <ev t="1" g1="10" g2="20" g3="30" g4="40" g5="50" />
+  <ev t="2" g1="11" g2="21" g3="31" g4="41" g5="51" />
+</pulseprogram>
+""",
+        encoding="utf-8",
+    )
+
+    grad_time, gradient_attr_names, grads = readGrads(str(tmp_path))
+
+    assert gradient_attr_names == ["g1", "g2", "g3", "g4", "g5"]
+    np.testing.assert_allclose(grad_time, np.array([0.001, 0.002]))
+    np.testing.assert_allclose(
+        grads,
+        np.array(
+            [
+                [10.0, 11.0],
+                [20.0, 21.0],
+                [30.0, 31.0],
+                [40.0, 41.0],
+                [50.0, 51.0],
+            ]
+        ),
+    )
 
 
 def test_gradient_duty_cycle_uses_startup_padding(app_logic: GUIapp) -> None:
@@ -442,7 +479,8 @@ def test_read_bruker_channels_attaches_pulse_program_event_annotations(bruker_fi
     assert all(ann.get("name") != "ppg_events" for ann in regular_nco_channel["annotations"])
 
     gradient_channel = channels[-1]
-    assert len(gradient_channel) == 3
+    assert len(gradient_channel) >= 3
+    assert [line["key"] for line in gradient_channel[:3]] == ["Gx", "Gy", "Gz"]
     assert not any(ann.get("name") == "ppg_events" for ann in gradient_channel[0]["annotations"])
     assert gradient_channel[1]["annotations"] == []
     assert gradient_channel[2]["annotations"] == []

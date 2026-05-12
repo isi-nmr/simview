@@ -30,7 +30,34 @@ def bruker_pw_attenuation_db_to_watts(attenuation_db: np.ndarray | float, refere
     return reference_watts * np.power(10.0, -att / 10.0)
 
 
-def getGradEvents(dict: dict) -> tuple[np.ndarray, np.ndarray]:
+def _gradient_attr_sort_key(attr_name: str) -> int:
+    match = re.fullmatch(r"g(\d+)", attr_name)
+    if match is None:
+        return 10**9
+    return int(match.group(1))
+
+
+def _gradient_attr_names_from_mapping(attrs: Mapping[str, object], prefix: str = "") -> list[str]:
+    return sorted(
+        [
+            key[len(prefix):]
+            for key in attrs
+            if isinstance(key, str) and re.fullmatch(rf"{re.escape(prefix)}g\d+", key) is not None
+        ],
+        key=_gradient_attr_sort_key,
+    )
+
+
+def _gradient_display_name(attr_name: str) -> str:
+    return {
+        "g1": "Gx",
+        "g2": "Gy",
+        "g3": "Gz",
+        "g4": "B0",
+    }.get(attr_name, attr_name)
+
+
+def getGradEvents(dict: dict) -> tuple[np.ndarray, list[str], np.ndarray]:
     events = dict["pulseprogram"]["ev"]
     if isinstance(events, Mapping):
         events = [events]
@@ -39,17 +66,22 @@ def getGradEvents(dict: dict) -> tuple[np.ndarray, np.ndarray]:
 
     tUnit = float(dict["pulseprogram"]["@timeunit"])
 
-    grads = np.zeros((3, len(events)))
+    gradient_attr_names: list[str] = []
+    for event in events:
+        gradient_attr_names.extend(_gradient_attr_names_from_mapping(event, prefix="@"))
+    gradient_attr_names = sorted(set(gradient_attr_names), key=_gradient_attr_sort_key)
+
+    grads = np.zeros((len(gradient_attr_names), len(events)))
     ind = 0
     for event in events:
-        if "@g1" not in event:
+        if "@t" not in event or not gradient_attr_names:
             continue
 
         time[ind] = float(event["@t"]) * tUnit
-        grads[:, ind] = [float(event["@g1"]), float(event["@g2"]), float(event["@g3"])]
+        grads[:, ind] = [float(event.get(f"@{attr_name}", 0.0)) for attr_name in gradient_attr_names]
         ind = ind + 1
 
-    return time[:ind], grads[:, :ind]
+    return time[:ind], gradient_attr_names, grads[:, :ind]
 
 
 def _count_event_tags(xml_path: str) -> int:
@@ -81,6 +113,13 @@ def _find_xml_attr(line: bytes, key: bytes) -> bytes | None:
     return line[start:end]
 
 
+def _find_gradient_attrs_in_xml_line(line: bytes) -> dict[str, float]:
+    gradient_attrs: dict[str, float] = {}
+    for match in re.finditer(rb'g(\d+)="([^"]+)"', line):
+        gradient_attrs[f"g{int(match.group(1))}"] = float(match.group(2))
+    return gradient_attrs
+
+
 def _read_timeunit_from_xml_bytes(xml_path: str) -> float:
     # Read only the beginning of the file where <pulseprogram ... timeunit=...> is expected.
     with open(xml_path, "rb") as handle:
@@ -102,26 +141,29 @@ def _readGrads_fast_line(
     gcube_path: str,
     progress_callback: Callable[[float, str], None] | None = None,
     progress_label: str = "Parsing gradient events",
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, list[str], np.ndarray]:
     line_ev_count = 0
     token_ev_count = 0
+    gradient_attr_names: set[str] = set()
     with open(gcube_path, "rb") as handle:
         for raw_line in handle:
             stripped = raw_line.lstrip()
             token_ev_count += stripped.count(b"<ev")
             if stripped.startswith(b"<ev"):
                 line_ev_count += 1
+                gradient_attr_names.update(_find_gradient_attrs_in_xml_line(stripped))
 
     if line_ev_count == 0:
-        return np.zeros(0, dtype=float), np.zeros((3, 0), dtype=float)
+        return np.zeros(0, dtype=float), [], np.zeros((0, 0), dtype=float)
 
     # Guardrail: if many <ev tokens are not line-oriented, fast parser may miss data.
     if token_ev_count > line_ev_count * 1.05:
         raise ValueError("GCube XML is not line-oriented enough for fast parser")
 
+    ordered_gradient_attr_names = sorted(gradient_attr_names, key=_gradient_attr_sort_key)
     t_unit = _read_timeunit_from_xml_bytes(gcube_path)
     t = np.zeros(line_ev_count, dtype=float)
-    grads = np.zeros((3, line_ev_count), dtype=float)
+    grads = np.zeros((len(ordered_gradient_attr_names), line_ev_count), dtype=float)
 
     progress_step = max(line_ev_count // 200, 1)
     parsed_lines = 0
@@ -139,27 +181,25 @@ def _readGrads_fast_line(
 
             parsed_lines += 1
 
-            g1 = _find_xml_attr(stripped, b'g1="')
-            if g1 is None:
+            gradient_values = _find_gradient_attrs_in_xml_line(stripped)
+            if not gradient_values:
                 continue
-            g2 = _find_xml_attr(stripped, b'g2="')
-            g3 = _find_xml_attr(stripped, b'g3="')
             tv = _find_xml_attr(stripped, b't="')
-            if g2 is None or g3 is None or tv is None:
+            if tv is None:
                 continue
 
             t[grad_index] = float(tv) * t_unit
-            grads[:, grad_index] = [float(g1), float(g2), float(g3)]
+            grads[:, grad_index] = [gradient_values.get(attr_name, 0.0) for attr_name in ordered_gradient_attr_names]
             grad_index += 1
 
-    return t[:grad_index], grads[:, :grad_index]
+    return t[:grad_index], ordered_gradient_attr_names, grads[:, :grad_index]
 
 
 def readGrads(
     path: str,
     progress_callback: Callable[[float, str], None] | None = None,
     progress_label: str = "Parsing gradient events",
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, list[str], np.ndarray]:
     gcube_path = path + "/" + "_GCube.xml"
     grad_parser = os.environ.get("SIMVIEW_GRAD_PARSER", "auto").lower()
     if grad_parser not in {"auto", "fast", "xml"}:
@@ -179,8 +219,9 @@ def readGrads(
     total_events = _count_event_tags(gcube_path)
     progress_step = max(total_events // 200, 1) if total_events > 0 else 1
 
+    gradient_attr_names: list[str] = []
     time = np.zeros(max(total_events, 1), dtype=float)
-    grads = np.zeros((3, max(total_events, 1)), dtype=float)
+    grads = np.zeros((0, max(total_events, 1)), dtype=float)
 
     t_unit = 1.0
     event_index = 0
@@ -206,21 +247,35 @@ def readGrads(
 
         attrs = element.attrib
         event_index += 1
-        if "g1" in attrs and "g2" in attrs and "g3" in attrs and "t" in attrs:
+        event_gradient_attr_names = _gradient_attr_names_from_mapping(attrs)
+        if event_gradient_attr_names and "t" in attrs:
+            merged_gradient_attr_names = sorted(
+                set(gradient_attr_names).union(event_gradient_attr_names),
+                key=_gradient_attr_sort_key,
+            )
+            if merged_gradient_attr_names != gradient_attr_names:
+                new_grads = np.zeros((len(merged_gradient_attr_names), grads.shape[1]), dtype=float)
+                old_index_map = {name: index for index, name in enumerate(gradient_attr_names)}
+                for new_index, attr_name in enumerate(merged_gradient_attr_names):
+                    old_index = old_index_map.get(attr_name)
+                    if old_index is not None:
+                        new_grads[new_index, :] = grads[old_index, :]
+                grads = new_grads
+                gradient_attr_names = merged_gradient_attr_names
             if grad_index >= time.size:
                 new_size = max(time.size * 2, grad_index + 1)
                 new_time = np.zeros(new_size, dtype=float)
-                new_grads = np.zeros((3, new_size), dtype=float)
+                new_grads = np.zeros((len(gradient_attr_names), new_size), dtype=float)
                 new_time[:grad_index] = time[:grad_index]
                 new_grads[:, :grad_index] = grads[:, :grad_index]
                 time = new_time
                 grads = new_grads
             time[grad_index] = float(attrs["t"]) * t_unit
-            grads[:, grad_index] = [float(attrs["g1"]), float(attrs["g2"]), float(attrs["g3"])]
+            grads[:, grad_index] = [float(attrs.get(attr_name, 0.0)) for attr_name in gradient_attr_names]
             grad_index += 1
         element.clear()
 
-    return time[:grad_index], grads[:, :grad_index]
+    return time[:grad_index], gradient_attr_names, grads[:, :grad_index]
 
 
 def initNco(nEvents: int) -> dict:
@@ -569,7 +624,7 @@ def parseBrkrChannels(
     )
 
     emit_progress(46, "Reading gradients")
-    gradTime, grads = readGrads(
+    gradTime, gradient_attr_names, grads = readGrads(
         path,
         progress_callback=lambda fraction, label: emit_progress(46 + int(8 * fraction), label),
         progress_label="Parsing _GCube.xml events",
@@ -676,53 +731,35 @@ def parseBrkrChannels(
         )
 
     emit_progress(96, "Preparing gradient channels")
-    channels.append(
-        [
-            {
-                "chanLabel": "Gradients",
-                "label": "Gx",
-                "type": "grads",
-                "ind": str(0),
-                "key": "Gx",
-                "plotType": "mag",
-                "t": gradTime,
-                "data": grads[0],
-                "raw_data": grads[0].copy(),
-                "units": "%",
-                "raw_units": "%",
-                "annotations": [],
-                "pen": "g",
-            },
-            {
-                "label": "Gy",
-                "type": "grads",
-                "ind": str(1),
-                "key": "Gy",
-                "plotType": "mag",
-                "t": gradTime,
-                "data": grads[1],
-                "raw_data": grads[1].copy(),
-                "units": "%",
-                "raw_units": "%",
-                "annotations": [],
-                "pen": "r",
-            },
-            {
-                "label": "Gz",
-                "type": "grads",
-                "ind": str(2),
-                "key": "Gz",
-                "plotType": "mag",
-                "t": gradTime,
-                "data": grads[2],
-                "raw_data": grads[2].copy(),
-                "units": "%",
-                "raw_units": "%",
-                "annotations": [],
-                "pen": "b",
-            },
-        ]
-    )
+    gradient_pen_map = {
+        "g1": "g",
+        "g2": "r",
+        "g3": "b",
+        "g4": "y",
+    }
+    gradient_channel: list[dict[str, object]] = []
+    for grad_index, attr_name in enumerate(gradient_attr_names):
+        line = {
+            "label": _gradient_display_name(attr_name),
+            "type": "grads",
+            "ind": str(grad_index),
+            "key": _gradient_display_name(attr_name),
+            "source_attr": attr_name,
+            "plotType": "mag",
+            "t": gradTime,
+            "data": grads[grad_index],
+            "raw_data": grads[grad_index].copy(),
+            "units": "%",
+            "raw_units": "%",
+            "annotations": [],
+            "pen": gradient_pen_map.get(attr_name),
+        }
+        if grad_index == 0:
+            line["chanLabel"] = "Gradients"
+        gradient_channel.append(line)
+
+    if gradient_channel:
+        channels.append(gradient_channel)
 
     emit_progress(98, "Finalizing Bruker channels")
     return channels, info
