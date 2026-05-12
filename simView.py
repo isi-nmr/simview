@@ -53,6 +53,7 @@ class GUIapp(
         self.gradientCalibrationHzPerMm = 0.0
         self.nucleusGammaMHzPerT = PROTON_GAMMA_MHZ_PER_T
         self.gradientDisplayUnits = "hz_per_mm"
+        self.splitGradientChannels = False
         self.brukerPwReferenceWatts = 1.0
         self.themeMode = "system"
         self.trajectoryZeroReferenceTime: float | None = None
@@ -199,6 +200,7 @@ class GUIapp(
             self.gradientDisplayUnits = "mt_per_m" if legacy_display_mt_per_m else "hz_per_mm"
         else:
             self.gradientDisplayUnits = str(stored_gradient_display_units).lower()
+        self.splitGradientChannels = bool(self.settings.value("splitGradientChannels", False, type=bool))
         self.themeMode = str(self.settings.value("themeMode", "system")).lower()
         self.derivedSignalStartupPadding = float(self.settings.value("derivedSignalStartupPadding", 1e-2, type=float))
         stored_trajectory_zero = self.settings.value("trajectoryZeroReferenceTime", None)
@@ -355,6 +357,8 @@ class GUIapp(
         self.gradientDisplayUnitsComboBox.addItem("mT/m", "mt_per_m")
         gradient_display_index = max(self.gradientDisplayUnitsComboBox.findData(self.gradientDisplayUnits), 0)
         self.gradientDisplayUnitsComboBox.setCurrentIndex(gradient_display_index)
+        self.splitGradientChannelsCheckBox = QtWidgets.QCheckBox("Show gradients separately")
+        self.splitGradientChannelsCheckBox.setChecked(self.splitGradientChannels)
         self.applyScannerSettingsButton = QtWidgets.QPushButton("Apply Settings")
         self.applyScannerSettingsButton.setObjectName("primaryButton")
         self.applyScannerSettingsButton.clicked.connect(self.apply_scanner_settings)
@@ -381,6 +385,7 @@ class GUIapp(
         scannerLayout.addRow("Bruker PW Ref", self.brukerPwReferenceSpinBox)
         scannerLayout.addRow("Max Grad @ 100%", self.maxGradientStrengthValue)
         scannerLayout.addRow("Gradient Display", self.gradientDisplayUnitsComboBox)
+        scannerLayout.addRow("Gradient Layout", self.splitGradientChannelsCheckBox)
         scannerGroupLayout.addLayout(scannerLayout)
 
         derivedSignalsGroup = QtWidgets.QGroupBox("Derived Signals")

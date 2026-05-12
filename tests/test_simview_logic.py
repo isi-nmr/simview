@@ -22,6 +22,7 @@ def make_app() -> GUIapp:
     app.gradientCalibrationHzPerMm = 0.0
     app.nucleusGammaMHzPerT = PROTON_GAMMA_MHZ_PER_T
     app.gradientDisplayUnits = "hz_per_mm"
+    app.splitGradientChannels = False
     app.trajectoryZeroReferenceTime = None
     app.derivedSignalStartupPadding = 1.0
     app.channels = []
@@ -248,6 +249,91 @@ def test_gradient_scaling_uses_configured_gamma_for_mt_per_m(app_logic: GUIapp) 
 
     np.testing.assert_allclose(scaled, np.array([0.0, 1.0, 2.0]))
     assert app_logic.get_gradient_display_units("%") == "mT/m"
+
+
+def test_gradient_update_does_not_scale_non_axis_gradient_channels(app_logic: GUIapp) -> None:
+    app_logic.gradientCalibrationHzPerMm = 100.0
+    app_logic.nucleusGammaMHzPerT = 50.0
+    app_logic.gradientDisplayUnits = "mt_per_m"
+    app_logic.channels = [
+        [
+            {
+                "type": "grads",
+                "key": "Gx",
+                "units": "%",
+                "raw_units": "%",
+                "data": np.array([0.0, 50.0, 100.0]),
+            },
+            {
+                "type": "grads",
+                "key": "B0",
+                "source_attr": "g4",
+                "units": "%",
+                "raw_units": "%",
+                "data": np.array([10.0, 20.0, 30.0]),
+            },
+        ],
+    ]
+
+    app_logic.update_gradient_channels()
+
+    gx_line, b0_line = app_logic.channels[0]
+    np.testing.assert_allclose(gx_line["data"], np.array([0.0, 1.0, 2.0]))
+    assert gx_line["units"] == "mT/m"
+    np.testing.assert_allclose(b0_line["data"], np.array([10.0, 20.0, 30.0]))
+    assert b0_line["units"] == "%"
+    assert b0_line["physical_hz_per_mm"] is None
+
+
+def test_remove_zero_gradient_lines_filters_only_zero_gradient_traces(app_logic: GUIapp) -> None:
+    app_logic.channels = [
+        [
+            {
+                "type": "grads",
+                "key": "Gx",
+                "label": "Gx",
+                "raw_data": np.array([0.0, 0.0, 0.0]),
+                "data": np.array([0.0, 0.0, 0.0]),
+            },
+            {
+                "type": "grads",
+                "key": "Gy",
+                "label": "Gy",
+                "raw_data": np.array([0.0, 1.0, 0.0]),
+                "data": np.array([0.0, 1.0, 0.0]),
+            },
+        ],
+        [
+            {
+                "type": "NCO",
+                "key": "am",
+                "data": np.array([0.0, 0.0, 0.0]),
+            },
+        ],
+    ]
+
+    app_logic.remove_zero_gradient_lines()
+
+    assert [line["key"] for line in app_logic.channels[0]] == ["Gy"]
+    assert app_logic.channels[1][0]["key"] == "am"
+
+
+def test_split_recorded_gradient_channels_creates_one_channel_per_gradient(app_logic: GUIapp) -> None:
+    app_logic.splitGradientChannels = True
+    app_logic.channels = [
+        [
+            {"type": "NCO", "key": "am", "chanLabel": "NCO_0_am"},
+        ],
+        [
+            {"type": "grads", "key": "Gx", "label": "Gx", "chanLabel": "Gradients"},
+            {"type": "grads", "key": "Gy", "label": "Gy"},
+        ],
+    ]
+
+    app_logic.split_recorded_gradient_channels()
+
+    assert [channel[0]["chanLabel"] for channel in app_logic.channels] == ["NCO_0_am", "Gx", "Gy"]
+    assert all(len(channel) == 1 for channel in app_logic.channels)
 
 
 def test_set_interaction_mode_clears_shared_measurement_state(app_logic: GUIapp) -> None:

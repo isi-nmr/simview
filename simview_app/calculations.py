@@ -59,6 +59,9 @@ class CalculationMixin:
         if self.gradientCalibrationHzPerMm <= 0:
             return None
 
+        if self.classify_gradient_axis(line) is None:
+            return None
+
         raw_units = str(line.get("raw_units", line.get("units", "%")))
         if not self.is_percent_gradient_units(raw_units):
             return None
@@ -76,8 +79,12 @@ class CalculationMixin:
                 line["raw_data"] = raw_data
                 line["raw_units"] = raw_units
                 line["physical_hz_per_mm"] = self.get_gradient_physical_hz_per_mm(line)
-                line["data"] = self.scale_gradient_data(raw_data, raw_units)
-                line["units"] = self.get_gradient_display_units(raw_units)
+                if line["physical_hz_per_mm"] is None:
+                    line["data"] = raw_data
+                    line["units"] = raw_units.strip() or "%"
+                else:
+                    line["data"] = self.scale_gradient_data(raw_data, raw_units)
+                    line["units"] = self.get_gradient_display_units(raw_units)
 
     def classify_gradient_axis(self, line: dict) -> str | None:
         for candidate in (

@@ -133,6 +133,52 @@ class DataLoadingMixin:
 
         return True
 
+    def is_zero_gradient_line(self, line: dict) -> bool:
+        if line.get("type") != "grads":
+            return False
+
+        values = np.asarray(line.get("raw_data", line.get("data", [])), dtype=float)
+        if values.size == 0:
+            return False
+
+        finite_values = values[np.isfinite(values)]
+        if finite_values.size == 0:
+            return False
+
+        return bool(np.allclose(finite_values, 0.0, atol=1e-15, rtol=0.0))
+
+    def remove_zero_gradient_lines(self) -> None:
+        filtered_channels: list[list[dict]] = []
+        for channel in self.channels:
+            if any(line.get("type") == "grads" for line in channel):
+                channel = [line for line in channel if not self.is_zero_gradient_line(line)]
+                if channel:
+                    channel[0]["chanLabel"] = channel[0].get("chanLabel", "Gradients")
+            if channel:
+                filtered_channels.append(channel)
+        self.channels = filtered_channels
+
+    def split_recorded_gradient_channels(self) -> None:
+        if not getattr(self, "splitGradientChannels", False):
+            return
+
+        split_channels: list[list[dict]] = []
+        for channel in self.channels:
+            if not any(line.get("type") == "grads" for line in channel):
+                split_channels.append(channel)
+                continue
+
+            for line in channel:
+                if line.get("type") != "grads":
+                    split_channels.append([line])
+                    continue
+                split_line = dict(line)
+                label = str(split_line.get("key") or split_line.get("label") or "Gradient")
+                split_line["chanLabel"] = label
+                split_channels.append([split_line])
+
+        self.channels = split_channels
+
     def resetApp(self) -> None:
         if self.plotContainers:
             for container in self.plotContainers:
@@ -190,6 +236,8 @@ class DataLoadingMixin:
 
     def _complete_channel_load(self, progress: QtWidgets.QProgressDialog) -> None:
         self.update_gradient_channels()
+        self.remove_zero_gradient_lines()
+        self.split_recorded_gradient_channels()
         self.channels.extend(self.build_gradient_derived_channels())
         self.channels.extend(self.build_nco_power_derived_channels())
         self.channels = [channel for channel in self.channels if not self.is_zero_channel(channel)]
