@@ -193,7 +193,7 @@ class CalculationMixin:
             if refocus_time > float(time_array[-1]):
                 continue
 
-            reference_value = float(
+            current_value = float(
                 np.interp(
                     refocus_time,
                     time_array,
@@ -203,7 +203,7 @@ class CalculationMixin:
                 ),
             )
             refocus_mask = time_array >= refocus_time
-            refocused[refocus_mask] = (2.0 * reference_value) - refocused[refocus_mask]
+            refocused[refocus_mask] -= 2.0 * current_value
         return refocused
 
     def apply_trajectory_display_transforms(self, time: np.ndarray, trajectory: np.ndarray) -> np.ndarray:

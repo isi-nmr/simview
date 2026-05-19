@@ -177,6 +177,16 @@ def test_gradient_duty_cycle_uses_startup_padding(app_logic: GUIapp) -> None:
     np.testing.assert_allclose(duty_cycle, np.array([0.0, 50.0, 66.66666667]), rtol=1e-7, atol=1e-7)
 
 
+def test_gradient_trajectory_integrates_sparse_nonequidistant_trapezoids(app_logic: GUIapp) -> None:
+    time = np.array([0.0, 0.3, 1.0, 2.0, 2.2, 2.5, 3.0, 3.4, 4.0, 4.8, 5.3, 5.5, 6.0])
+    data = np.array([0.0, 6.0, 10.0, 10.0, 6.0, 0.0, 0.0, -4.0, -8.0, -8.0, -3.0, 0.0, 0.0])
+
+    trajectory = app_logic.compute_gradient_trajectory(time, data)
+
+    expected = np.array([0.0, 0.9, 6.5, 16.5, 18.1, 19.0, 19.0, 18.2, 14.6, 8.2, 5.45, 5.15, 5.15])
+    np.testing.assert_allclose(trajectory, expected, rtol=1e-12, atol=1e-12)
+
+
 def test_zero_trajectory_to_reference_interpolates_at_cursor_time(app_logic: GUIapp) -> None:
     app_logic.trajectoryZeroReferenceTime = 0.5
     time = np.array([0.0, 1.0, 2.0])
@@ -187,14 +197,14 @@ def test_zero_trajectory_to_reference_interpolates_at_cursor_time(app_logic: GUI
     np.testing.assert_allclose(zeroed, np.array([-1.0, 1.0, 3.0]))
 
 
-def test_refocus_trajectory_reflects_curve_after_cursor_time(app_logic: GUIapp) -> None:
+def test_refocus_trajectory_flips_value_then_continues_accumulating(app_logic: GUIapp) -> None:
     app_logic.trajectoryRefocusTimes = [1.0]
     time = np.array([0.0, 1.0, 2.0, 3.0])
     trajectory = np.array([0.0, 2.0, 4.0, 6.0])
 
     refocused = app_logic.apply_trajectory_refocuses(time, trajectory)
 
-    np.testing.assert_allclose(refocused, np.array([0.0, 2.0, 0.0, -2.0]))
+    np.testing.assert_allclose(refocused, np.array([0.0, -2.0, 0.0, 2.0]))
 
 
 def test_trajectory_display_transforms_apply_zero_before_refocus(app_logic: GUIapp) -> None:
@@ -205,7 +215,7 @@ def test_trajectory_display_transforms_apply_zero_before_refocus(app_logic: GUIa
 
     transformed = app_logic.apply_trajectory_display_transforms(time, trajectory)
 
-    np.testing.assert_allclose(transformed, np.array([-1.0, 1.0, -1.0]))
+    np.testing.assert_allclose(transformed, np.array([-1.0, -1.0, 1.0]))
 
 
 def test_build_nco_power_derived_channels_merges_event_times(app_logic: GUIapp) -> None:
