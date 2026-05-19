@@ -197,6 +197,7 @@ class DataLoadingMixin:
         self.pulseProgramTimeline = None
         self.pulseProgramLineMapping = {}
         self.rfPulseStartTimes = None
+        self.rfPulseFocusTimes = None
         if hasattr(self, "prevRfPulseButton"):
             self.prevRfPulseButton.setEnabled(False)
         if hasattr(self, "nextRfPulseButton"):
@@ -276,6 +277,7 @@ class DataLoadingMixin:
             plot.showCursor()
             plot.set_interaction_mode(self.interactionMode)
         self.update_rf_pulse_navigation_state()
+        self.add_rf_pulse_focus_markers()
         self.update_status(cursor_time=None, measurement=self.currentMeasurement)
 
     def _start_bruker_load(self, path: str, progress: QtWidgets.QProgressDialog, load_id: int) -> None:

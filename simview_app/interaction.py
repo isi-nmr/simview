@@ -529,6 +529,7 @@ class InteractionMixin:
         QtGui.QShortcut(QtGui.QKeySequence("Z"), self, activated=self.zoomModeButton.toggle)
         QtGui.QShortcut(QtGui.QKeySequence("E"), self, activated=self.snapMeasureAction.toggle)
         QtGui.QShortcut(QtGui.QKeySequence("T"), self, activated=self.zeroTrajectoryAtCursorAction.trigger)
+        QtGui.QShortcut(QtGui.QKeySequence("F"), self, activated=self.refocusTrajectoryAtCursorAction.trigger)
         QtGui.QShortcut(QtGui.QKeySequence("J"), self, activated=self.jumpToPpgLineAction.trigger)
         QtGui.QShortcut(QtGui.QKeySequence("["), self, activated=self.jump_to_previous_rf_pulse)
         QtGui.QShortcut(QtGui.QKeySequence("]"), self, activated=self.jump_to_next_rf_pulse)
@@ -549,6 +550,7 @@ class InteractionMixin:
             "<b>Z</b> Toggle zoom mode<br>"
             "<b>E</b> Toggle measure snap to events<br>"
             "<b>T</b> Zero trajectory at cursor<br>"
+            "<b>F</b> Add 180 refocus flip at cursor<br>"
             "<b>[ / ]</b> Jump previous / next RF pulse<br>"
             "<b>F1</b> Show this help<br><br>"
             "<b>Mouse controls</b><br><br>"
@@ -603,17 +605,44 @@ class InteractionMixin:
         self.apply_trajectory_zero_in_place()
         self.update_status()
 
+    def refocus_trajectory_at_cursor(self) -> None:
+        if self.currentCursorTime is None:
+            dialog.showErrorMessage("Move the cursor over a plot before adding a 180 refocus flip.")
+            return
+
+        refocus_time = float(self.currentCursorTime)
+        if not hasattr(self, "trajectoryRefocusTimes"):
+            self.trajectoryRefocusTimes = []
+        if all(abs(refocus_time - existing_time) > 1e-15 for existing_time in self.trajectoryRefocusTimes):
+            self.trajectoryRefocusTimes.append(refocus_time)
+            self.trajectoryRefocusTimes.sort()
+        self.apply_trajectory_zero_in_place()
+        self.update_status()
+
     def reset_trajectory_zero(self) -> None:
         self.trajectoryZeroReferenceTime = None
         self.settings.remove("trajectoryZeroReferenceTime")
         self.apply_trajectory_zero_in_place()
         self.update_status()
 
-    def detect_rf_pulse_starts(self) -> np.ndarray:
+    def reset_trajectory_refocuses(self) -> None:
+        self.trajectoryRefocusTimes = []
+        self.apply_trajectory_zero_in_place()
+        self.update_status()
+
+    def reset_trajectory_transforms(self) -> None:
+        self.trajectoryZeroReferenceTime = None
+        self.trajectoryRefocusTimes = []
+        self.settings.remove("trajectoryZeroReferenceTime")
+        self.apply_trajectory_zero_in_place()
+        self.update_status()
+
+    def detect_rf_pulse_windows(self) -> tuple[np.ndarray, np.ndarray]:
         if not self.channels:
-            return np.asarray([], dtype=float)
+            return np.asarray([], dtype=float), np.asarray([], dtype=float)
 
         pulse_start_times: list[float] = []
+        pulse_focus_times: list[float] = []
         for channel in self.channels:
             for line in channel:
                 if str(line.get("type", "")).upper() != "NCO":
@@ -634,15 +663,42 @@ class InteractionMixin:
                 threshold = 1e-12
                 active = norm_data > threshold
                 rise_indices = np.flatnonzero(active & np.concatenate(([True], ~active[:-1])))
-                pulse_start_times.extend(float(norm_time[index]) for index in rise_indices)
+                for rise_index in rise_indices:
+                    start_time = float(norm_time[rise_index])
+                    pulse_start_times.append(start_time)
+
+                    inactive_after = np.flatnonzero(~active[rise_index + 1 :])
+                    if inactive_after.size > 0:
+                        end_index = rise_index + 1 + int(inactive_after[0])
+                    else:
+                        end_index = min(rise_index + 1, norm_time.size - 1)
+                    end_time = float(norm_time[end_index])
+                    pulse_focus_times.append((start_time + end_time) * 0.5)
 
         if not pulse_start_times:
-            return np.asarray([], dtype=float)
-        return np.asarray(sorted(set(pulse_start_times)), dtype=float)
+            return np.asarray([], dtype=float), np.asarray([], dtype=float)
+        return (
+            np.asarray(sorted(set(pulse_start_times)), dtype=float),
+            np.asarray(sorted(set(pulse_focus_times)), dtype=float),
+        )
+
+    def detect_rf_pulse_starts(self) -> np.ndarray:
+        pulse_starts, _pulse_focuses = self.detect_rf_pulse_windows()
+        return pulse_starts
+
+    def is_rf_amplitude_channel(self, channel: list[dict]) -> bool:
+        for line in channel:
+            if str(line.get("type", "")).upper() != "NCO":
+                continue
+            key = str(line.get("key", "")).lower()
+            if key == "am" or key.endswith("_am"):
+                return True
+        return False
 
     def update_rf_pulse_navigation_state(self) -> None:
-        pulse_times = self.detect_rf_pulse_starts()
+        pulse_times, pulse_focus_times = self.detect_rf_pulse_windows()
         self.rfPulseStartTimes = pulse_times
+        self.rfPulseFocusTimes = pulse_focus_times
         has_pulses = pulse_times.size > 0
 
         if hasattr(self, "prevRfPulseButton"):
@@ -653,6 +709,17 @@ class InteractionMixin:
             self.prevRfPulseAction.setEnabled(has_pulses)
         if hasattr(self, "nextRfPulseAction"):
             self.nextRfPulseAction.setEnabled(has_pulses)
+
+    def add_rf_pulse_focus_markers(self) -> None:
+        focus_times = np.asarray(getattr(self, "rfPulseFocusTimes", []), dtype=float)
+        if focus_times.size == 0:
+            return
+
+        for channel, plot in zip(getattr(self, "channels", []), getattr(self, "plots", []), strict=False):
+            if not self.is_rf_amplitude_channel(channel):
+                continue
+            for focus_time in focus_times:
+                plot.add_annotation_marker(float(focus_time), "RF focus", color="m")
 
     def jump_to_rf_pulse_time(self, target_time: float) -> None:
         if not self.plots:
@@ -1039,6 +1106,7 @@ class InteractionMixin:
         cursor_text = self.format_time(self.currentCursorTime)
         measurement_text = self.format_time(self.currentMeasurement)
         snap_text = "On" if self.measureSnapToEvents else "Off"
+        refocus_count = len(getattr(self, "trajectoryRefocusTimes", []))
         pulse_program_text = self.get_pulse_program_location(self.currentCursorTime)
         self.statusBar().showMessage(
             " | ".join(
@@ -1048,6 +1116,7 @@ class InteractionMixin:
                     f"View width: {span_text}",
                     f"Cursor: {cursor_text}",
                     f"Measurement: {measurement_text}",
+                    f"180 flips: {refocus_count}",
                     f"PPG: {pulse_program_text}",
                 ),
             ),

@@ -28,6 +28,7 @@ def make_app() -> GUIapp:
     app.gradientDisplayUnits = "hz_per_mm"
     app.splitGradientChannels = False
     app.trajectoryZeroReferenceTime = None
+    app.trajectoryRefocusTimes = []
     app.derivedSignalStartupPadding = 1.0
     app.channels = []
     app.selectedChannels = []
@@ -184,6 +185,27 @@ def test_zero_trajectory_to_reference_interpolates_at_cursor_time(app_logic: GUI
     zeroed = app_logic.zero_trajectory_to_reference(time, trajectory)
 
     np.testing.assert_allclose(zeroed, np.array([-1.0, 1.0, 3.0]))
+
+
+def test_refocus_trajectory_reflects_curve_after_cursor_time(app_logic: GUIapp) -> None:
+    app_logic.trajectoryRefocusTimes = [1.0]
+    time = np.array([0.0, 1.0, 2.0, 3.0])
+    trajectory = np.array([0.0, 2.0, 4.0, 6.0])
+
+    refocused = app_logic.apply_trajectory_refocuses(time, trajectory)
+
+    np.testing.assert_allclose(refocused, np.array([0.0, 2.0, 0.0, -2.0]))
+
+
+def test_trajectory_display_transforms_apply_zero_before_refocus(app_logic: GUIapp) -> None:
+    app_logic.trajectoryZeroReferenceTime = 0.5
+    app_logic.trajectoryRefocusTimes = [1.0]
+    time = np.array([0.0, 1.0, 2.0])
+    trajectory = np.array([0.0, 2.0, 4.0])
+
+    transformed = app_logic.apply_trajectory_display_transforms(time, trajectory)
+
+    np.testing.assert_allclose(transformed, np.array([-1.0, 1.0, -1.0]))
 
 
 def test_build_nco_power_derived_channels_merges_event_times(app_logic: GUIapp) -> None:
@@ -782,8 +804,27 @@ def test_detect_rf_pulse_starts_from_nco_channels(app_logic: GUIapp) -> None:
     ]
 
     starts = app_logic.detect_rf_pulse_starts()
+    window_starts, focus_times = app_logic.detect_rf_pulse_windows()
 
     np.testing.assert_allclose(starts, np.array([1.0, 4.0]))
+    np.testing.assert_allclose(window_starts, np.array([1.0, 4.0]))
+    np.testing.assert_allclose(focus_times, np.array([2.0, 4.0]))
+
+
+def test_rf_focus_markers_are_added_only_to_amplitude_channels(app_logic: GUIapp) -> None:
+    app_logic.rfPulseFocusTimes = np.array([1.5])
+    app_logic.channels = [
+        [{"type": "NCO", "key": "am"}],
+        [{"type": "NCO", "key": "pw"}],
+        [{"type": "grads", "key": "Gx"}],
+    ]
+    app_logic.plots = [DummyCursorPlot(), DummyCursorPlot(), DummyCursorPlot()]
+
+    app_logic.add_rf_pulse_focus_markers()
+
+    assert app_logic.plots[0].markers == [(1.5, "RF focus", "m")]
+    assert app_logic.plots[1].markers == []
+    assert app_logic.plots[2].markers == []
 
 
 def test_jump_to_next_and_previous_rf_pulse_target_selection(app_logic: GUIapp) -> None:

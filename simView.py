@@ -50,6 +50,7 @@ class GUIapp(
         self.pulseProgramTimeline = None
         self.pulseProgramLineMapping = {}
         self.rfPulseStartTimes = None
+        self.rfPulseFocusTimes = None
         self.gradientCalibrationHzPerMm = 0.0
         self.nucleusGammaMHzPerT = PROTON_GAMMA_MHZ_PER_T
         self.gradientDisplayUnits = "hz_per_mm"
@@ -57,6 +58,7 @@ class GUIapp(
         self.brukerPwReferenceWatts = 1.0
         self.themeMode = "system"
         self.trajectoryZeroReferenceTime: float | None = None
+        self.trajectoryRefocusTimes: list[float] = []
         self.derivedSignalStartupPadding = 0.010
         self.inlineData = data
 
@@ -73,18 +75,24 @@ class GUIapp(
         self.jumpNButton = QtWidgets.QPushButton()
         self.prevRfPulseButton = QtWidgets.QPushButton("Prev RF")
         self.nextRfPulseButton = QtWidgets.QPushButton("Next RF")
+        self.refocusTrajectoryButton = QtWidgets.QPushButton("180 Flip")
+        self.resetTrajectoryTransformsButton = QtWidgets.QPushButton("Reset Traj")
         self.jumpPButton.setText("->")
         self.jumpNButton.setText("<-")
         self.jumpPButton.setFixedHeight(50)
         self.jumpNButton.setFixedHeight(50)
         self.prevRfPulseButton.setFixedHeight(50)
         self.nextRfPulseButton.setFixedHeight(50)
+        self.refocusTrajectoryButton.setFixedHeight(50)
+        self.resetTrajectoryTransformsButton.setFixedHeight(50)
         self.prevRfPulseButton.setEnabled(False)
         self.nextRfPulseButton.setEnabled(False)
         self.jumpNButton.clicked.connect(self.jumpXNeg)
         self.jumpPButton.clicked.connect(self.jumpXPos)
         self.prevRfPulseButton.clicked.connect(self.jump_to_previous_rf_pulse)
         self.nextRfPulseButton.clicked.connect(self.jump_to_next_rf_pulse)
+        self.refocusTrajectoryButton.clicked.connect(self.refocus_trajectory_at_cursor)
+        self.resetTrajectoryTransformsButton.clicked.connect(self.reset_trajectory_transforms)
         self.tSlider.valueChanged.connect(self.changeXRange)
         self.tSlider.setMinimum(0)
         self.tSlider.setMaximum(10000)
@@ -117,6 +125,8 @@ class GUIapp(
         buttonLayout.addWidget(self.resetViewButton)
         buttonLayout.addWidget(self.nextRfPulseButton)
         buttonLayout.addWidget(self.jumpPButton)
+        buttonLayout.addWidget(self.refocusTrajectoryButton)
+        buttonLayout.addWidget(self.resetTrajectoryTransformsButton)
         buttonLayout.addWidget(self.zoomModeButton)
         buttonLayout.addWidget(self.measureButton)
         self.measureButton.setFixedHeight(50)
@@ -153,6 +163,10 @@ class GUIapp(
         self.zeroTrajectoryAtCursorAction.triggered.connect(self.zero_trajectory_at_cursor)
         viewMenu.addAction(self.zeroTrajectoryAtCursorAction)
 
+        self.refocusTrajectoryAtCursorAction = QtGui.QAction("Add 180 Refocus Flip At Cursor", self)
+        self.refocusTrajectoryAtCursorAction.triggered.connect(self.refocus_trajectory_at_cursor)
+        viewMenu.addAction(self.refocusTrajectoryAtCursorAction)
+
         self.prevRfPulseAction = QtGui.QAction("Jump To Previous RF Pulse", self)
         self.prevRfPulseAction.triggered.connect(self.jump_to_previous_rf_pulse)
         viewMenu.addAction(self.prevRfPulseAction)
@@ -164,6 +178,14 @@ class GUIapp(
         self.resetTrajectoryZeroAction = QtGui.QAction("Reset Trajectory Zero", self)
         self.resetTrajectoryZeroAction.triggered.connect(self.reset_trajectory_zero)
         viewMenu.addAction(self.resetTrajectoryZeroAction)
+
+        self.resetTrajectoryRefocusAction = QtGui.QAction("Reset 180 Refocus Flips", self)
+        self.resetTrajectoryRefocusAction.triggered.connect(self.reset_trajectory_refocuses)
+        viewMenu.addAction(self.resetTrajectoryRefocusAction)
+
+        self.resetTrajectoryTransformsAction = QtGui.QAction("Reset Trajectory Zero And Refocus", self)
+        self.resetTrajectoryTransformsAction.triggered.connect(self.reset_trajectory_transforms)
+        viewMenu.addAction(self.resetTrajectoryTransformsAction)
 
         self.jumpToPpgLineAction = QtGui.QAction("Jump To PPG Line...", self)
         self.jumpToPpgLineAction.triggered.connect(self.jump_to_ppg_line)

@@ -176,6 +176,40 @@ class CalculationMixin:
         )
         return np.asarray(trajectory, dtype=float) - reference_value
 
+    def apply_trajectory_refocuses(self, time: np.ndarray, trajectory: np.ndarray) -> np.ndarray:
+        refocus_times = sorted(
+            {
+                float(time_value)
+                for time_value in getattr(self, "trajectoryRefocusTimes", [])
+                if np.isfinite(float(time_value))
+            },
+        )
+        if not refocus_times or time.size == 0 or trajectory.size == 0:
+            return trajectory
+
+        time_array = np.asarray(time, dtype=float)
+        refocused = np.asarray(trajectory, dtype=float).copy()
+        for refocus_time in refocus_times:
+            if refocus_time > float(time_array[-1]):
+                continue
+
+            reference_value = float(
+                np.interp(
+                    refocus_time,
+                    time_array,
+                    refocused,
+                    left=float(refocused[0]),
+                    right=float(refocused[-1]),
+                ),
+            )
+            refocus_mask = time_array >= refocus_time
+            refocused[refocus_mask] = (2.0 * reference_value) - refocused[refocus_mask]
+        return refocused
+
+    def apply_trajectory_display_transforms(self, time: np.ndarray, trajectory: np.ndarray) -> np.ndarray:
+        zeroed = self.zero_trajectory_to_reference(time, trajectory)
+        return self.apply_trajectory_refocuses(time, zeroed)
+
     def get_nco_channel_role(self, line: dict) -> tuple[str, str] | None:
         if line.get("type") != "NCO":
             return None
@@ -325,11 +359,11 @@ class CalculationMixin:
             for line_index, line in enumerate(channel):
                 raw_trajectory = np.asarray(line.get("raw_data", line.get("data", [])), dtype=float)
                 time = np.asarray(line.get("t", []), dtype=float)
-                zeroed_trajectory = self.zero_trajectory_to_reference(time, raw_trajectory)
-                line["data"] = zeroed_trajectory
+                display_trajectory = self.apply_trajectory_display_transforms(time, raw_trajectory)
+                line["data"] = display_trajectory
 
                 if line_index < len(plot.managed_curves):
-                    plot.update_managed_curve(line_index, time, zeroed_trajectory)
+                    plot.update_managed_curve(line_index, time, display_trajectory)
 
     def build_gradient_derived_channels(self) -> list[list[dict]]:
         gradient_axes: dict[str, dict] = {}
@@ -375,17 +409,17 @@ class CalculationMixin:
                     slew_units = "Hz/mm/s"
 
                 traj_time, traj_source = self.normalize_time_series(time, physical_hz_per_mm)
-                traj_data = self.compute_gradient_trajectory(traj_time, traj_source)
+                raw_traj_data = self.compute_gradient_trajectory(traj_time, traj_source)
                 traj_units = "cycles/mm"
             else:
                 time, data = self.normalize_time_series(time, display_data)
                 slew_time, slew_data = self.compute_gradient_slew_rate_profile(time, data)
                 slew_units = f"{display_units}/s" if display_units else "a.u./s"
                 traj_time = time
-                traj_data = self.compute_gradient_trajectory(time, data)
+                raw_traj_data = self.compute_gradient_trajectory(time, data)
                 traj_units = f"{display_units}*s" if display_units else "a.u.*s"
 
-            traj_data = self.zero_trajectory_to_reference(traj_time, traj_data)
+            traj_data = self.apply_trajectory_display_transforms(traj_time, raw_traj_data)
             duty_cycle_time, duty_cycle_source = self.normalize_time_series(time, display_data)
             duty_cycle_data = self.compute_gradient_duty_cycle(duty_cycle_time, duty_cycle_source)
 
@@ -416,7 +450,7 @@ class CalculationMixin:
                     "plotType": "mag",
                     "units": traj_units,
                     "t": traj_time,
-                    "raw_data": traj_data.copy(),
+                    "raw_data": raw_traj_data.copy(),
                     "data": traj_data,
                     "annotations": [],
                     "pen": pen,
