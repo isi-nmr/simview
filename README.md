@@ -109,7 +109,7 @@ Current tests cover:
 ## Acknowledgment
 If Sim View contributes to your pulse-sequence development or related research, please consider acknowledging the infrastructure support that helped make this work possible:
 
-`Czech-BioImaging LM2023050, funded by the Ministry of Education, Youth and Sports of the Czech Republic.`
+`This work was supported by the core facility ISI-MR within the Czech-BioImaging large RI project (LM2023050), funded by the Ministry of Education, Youth and Sports of the Czech Republic.`
 
 We would also be glad to hear about publications, presentations, or internal use cases where the tool proved helpful.
 
