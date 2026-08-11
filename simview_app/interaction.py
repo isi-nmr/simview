@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -731,7 +732,7 @@ class InteractionMixin:
             and np.isclose(float(pulse["duration"]), float(selected["duration"]), rtol=1e-3, atol=1e-9)
             and np.isclose(abs(float(pulse["area"])), abs(float(selected["area"])), rtol=1e-2, atol=1e-12)
         ]
-        if not hasattr(self, "trajectoryFlipSources"):
+        if "trajectoryFlipSources" not in self.__dict__:
             self.trajectoryFlipSources = {}
         added = 0
         for pulse in matching:
@@ -746,16 +747,41 @@ class InteractionMixin:
         self.statusBar().showMessage(f"Added {added} matching 180° RF flip(s).", 4000)
 
     def apply_calibrated_refocus_flips(self) -> None:
+        all_calibrations = list(getattr(self, "rfPulseCalibrations", []))
         calibrations = [
-            calibration for calibration in getattr(self, "rfPulseCalibrations", [])
+            calibration for calibration in all_calibrations
             if abs(float(calibration.get("flip_angle", 0.0)) - 180.0) <= 5.0
         ]
         if not calibrations:
             return
-        if not hasattr(self, "trajectoryFlipSources"):
+        if "trajectoryFlipSources" not in self.__dict__:
             self.trajectoryFlipSources = {}
+        diffusion_calibration = next(
+            (item for item in calibrations if re.search(r"(?:dw|diff)", str(item.get("name", "")), re.IGNORECASE)),
+            None,
+        )
+        rare_calibration = next(
+            (
+                item for item in calibrations
+                if re.search(r"(?:rare|refpulse|refpulse)", str(item.get("name", "")), re.IGNORECASE)
+                and item is not diffusion_calibration
+            ),
+            None,
+        )
+        excitation_calibrations = [
+            item for item in all_calibrations
+            if abs(float(item.get("flip_angle", 0.0)) - 90.0) <= 10.0
+        ]
         added = 0
-        for pulse in self.detect_rf_pulse_descriptors():
+        refocus_index_in_block = 0
+        for pulse in sorted(self.detect_rf_pulse_descriptors(), key=lambda item: float(item["focus"])):
+            is_excitation = any(
+                np.isclose(float(pulse["duration"]), float(calibration["duration"]), rtol=0.03, atol=2e-6)
+                for calibration in excitation_calibrations
+            )
+            if is_excitation:
+                refocus_index_in_block = 0
+                continue
             matching = next(
                 (
                     calibration for calibration in calibrations
@@ -765,11 +791,19 @@ class InteractionMixin:
             )
             if matching is None:
                 continue
+            # PVM_DwRfcPulse is the diffusion-module refocus immediately
+            # following excitation.  The remaining matched pulses in that
+            # excitation block form the RARE train and use RefPulse.
+            if refocus_index_in_block == 0 and diffusion_calibration is not None:
+                matching = diffusion_calibration
+            elif refocus_index_in_block > 0 and rare_calibration is not None:
+                matching = rare_calibration
             focus_time = float(pulse["focus"])
             if all(abs(focus_time - existing) > 1e-15 for existing in self.trajectoryRefocusTimes):
                 self.trajectoryRefocusTimes.append(focus_time)
                 self.trajectoryFlipSources[focus_time] = f"Method: {matching['name']} (180°)"
                 added += 1
+            refocus_index_in_block += 1
         if added:
             self.trajectoryRefocusTimes.sort()
             self.apply_trajectory_zero_in_place()
@@ -820,18 +854,12 @@ class InteractionMixin:
         acquisition_details = self.get_acquisition_window_details()
         acquisition_windows = [(float(item["start"]), float(item["end"])) for item in acquisition_details]
         echo_candidates = self.find_trajectory_echo_candidates()
-        adc_echo_labels: dict[float, str] = {}
-        adc_echo_number = 0
-        for candidate in echo_candidates:
-            echo_time = float(candidate["time"])
-            if any(start <= echo_time <= end for start, end in acquisition_windows):
-                adc_echo_number += 1
-                adc_echo_labels[echo_time] = f"E{adc_echo_number} in ADC"
         zero_time = getattr(self, "trajectoryZeroReferenceTime", None)
         for channel, plot in zip(getattr(self, "channels", []), getattr(self, "plots", []), strict=False):
             plot.clear_annotation_markers(group="trajectory_flip")
             plot.clear_annotation_markers(group="trajectory_echo")
             plot.clear_annotation_markers(group="trajectory_zero")
+            plot.clear_annotation_markers(group="trajectory_excitation_reset")
             plot.clear_overlay_regions(group="acquisition_window")
             if not channel or channel[0].get("chanLabel") not in {
                 "Gradient Trajectory", "Gradient Trajectory Residual", "Coherence Order",
@@ -858,12 +886,22 @@ class InteractionMixin:
                     color="#7a3e00",
                     group="trajectory_zero",
                 )
+            source_time = np.asarray(channel[0].get("t", []), dtype=float)
+            for excitation_time in self.get_trajectory_excitation_times(source_time):
+                if zero_time is not None and abs(float(excitation_time) - float(zero_time)) <= 1e-12:
+                    continue
+                plot.add_annotation_marker(
+                    float(excitation_time),
+                    "TR trajectory reset",
+                    color="#7a3e00",
+                    group="trajectory_excitation_reset",
+                )
             for candidate in echo_candidates:
                 echo_time = float(candidate["time"])
                 in_acquisition = any(start <= echo_time <= end for start, end in acquisition_windows)
                 plot.add_annotation_marker(
                     echo_time,
-                    adc_echo_labels.get(echo_time, "Echo in ADC") if in_acquisition else "Echo",
+                    "Echo in ADC" if in_acquisition else "Echo",
                     color="#006b3c" if in_acquisition else "#8a6500",
                     group="trajectory_echo",
                 )
@@ -881,19 +919,14 @@ class InteractionMixin:
         if table is None:
             return
         table.clear()
-        adc_echo_number = 0
         for candidate in self.find_trajectory_echo_candidates():
             time_value = float(candidate["time"])
             job = next(
                 (str(item.get("job_type", "ADC")) for item in details if float(item["start"]) <= time_value <= float(item["end"])),
                 "outside ADC",
             )
-            echo_label = "Echo"
-            if job != "outside ADC":
-                adc_echo_number += 1
-                echo_label = f"E{adc_echo_number}"
             item = QtWidgets.QListWidgetItem(
-                f"{echo_label} | {self.format_time(time_value)} | {job} | "
+                f"{self.format_time(time_value)} | {job} | "
                 f"K=({candidate['kx']:.3g}, {candidate['ky']:.3g}, {candidate['kz']:.3g}) | "
                 f"|K|={candidate['residual']:.3g}",
             )
@@ -1189,6 +1222,7 @@ class InteractionMixin:
         self.splitGradientChannels = bool(self.splitGradientChannelsCheckBox.isChecked())
         self.derivedSignalStartupPadding = float(self.derivedSignalStartupPaddingSpinBox.value())
         self.trajectoryEchoRelativeTolerance = float(self.trajectoryEchoToleranceSpinBox.value()) / 100.0
+        self.trajectoryRefocusFlipAngleDegrees = float(self.trajectoryRefocusFlipAngleSpinBox.value())
         self.settings.setValue("themeMode", self.themeMode)
         self.settings.setValue("gradientCalibrationHzPerMm", self.gradientCalibrationHzPerMm)
         self.settings.setValue("nucleusGammaMHzPerT", self.nucleusGammaMHzPerT)
@@ -1197,6 +1231,7 @@ class InteractionMixin:
         self.settings.setValue("splitGradientChannels", self.splitGradientChannels)
         self.settings.setValue("derivedSignalStartupPadding", self.derivedSignalStartupPadding)
         self.settings.setValue("trajectoryEchoRelativeTolerance", self.trajectoryEchoRelativeTolerance)
+        self.settings.setValue("trajectoryRefocusFlipAngleDegrees", self.trajectoryRefocusFlipAngleDegrees)
         self.apply_theme_settings()
         self.update_existing_plot_themes()
         self.update_scanner_settings_display()
@@ -1208,6 +1243,12 @@ class InteractionMixin:
                 for check_box in self.checkBoxes
                 if check_box.isChecked()
             ]
+            # A saved channel selection otherwise keeps a newly relevant
+            # branching plot hidden after this settings-triggered reload.
+            if not np.isclose(self.trajectoryRefocusFlipAngleDegrees, 180.0, atol=1e-9):
+                pathway_channel_key = "Imperfect RF Pathway Weights"
+                if pathway_channel_key not in self.selectedChannels:
+                    self.selectedChannels.append(pathway_channel_key)
             self.reload_current_data()
         self.update_status()
 

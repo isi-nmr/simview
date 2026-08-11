@@ -266,6 +266,19 @@ def test_refocus_trajectory_handles_multiple_off_sample_flips(app_logic: GUIapp)
     np.testing.assert_allclose(transformed, np.array([0.0, 0.0, 0.0, 0.0]))
 
 
+def test_trajectory_resets_at_each_calibrated_excitation_block(app_logic: GUIapp) -> None:
+    app_logic.rfPulseCalibrations = [{"name": "ExcPulse1", "duration": 0.5, "flip_angle": 90.0}]
+    app_logic.detect_rf_pulse_descriptors = lambda: [
+        {"focus": 2.0, "duration": 0.5}, {"focus": 4.0, "duration": 0.5},
+    ]
+    time = np.arange(6.0)
+    trajectory = np.arange(6.0)
+
+    transformed = app_logic.apply_trajectory_refocuses(time, trajectory)
+
+    np.testing.assert_allclose(transformed, np.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0]))
+
+
 def test_coherence_order_toggles_at_flips_relative_to_selected_zero(app_logic: GUIapp) -> None:
     app_logic.trajectoryZeroReferenceTime = 1.0
     app_logic.trajectoryRefocusTimes = [0.5, 2.0]
@@ -274,6 +287,36 @@ def test_coherence_order_toggles_at_flips_relative_to_selected_zero(app_logic: G
 
     np.testing.assert_allclose(profile_time, np.array([0.0, 0.5, 2.0, 3.0]))
     np.testing.assert_allclose(coherence_order, np.array([1.0, -1.0, 1.0, 1.0]))
+
+
+def test_imperfect_refocus_pathway_weights_branch_transverse_and_longitudinal_states(app_logic: GUIapp) -> None:
+    app_logic.trajectoryRefocusTimes = [1.0]
+    app_logic.trajectoryRefocusFlipAngleDegrees = 180.0
+
+    time, weights = app_logic.compute_imperfect_refocus_pathway_weights(np.array([0.0, 2.0]))
+
+    np.testing.assert_allclose(time, np.array([0.0, 1.0, 2.0]))
+    np.testing.assert_allclose(weights[:, 0], np.array([1.0, 0.0, 0.0]))
+    np.testing.assert_allclose(weights[:, 1], np.array([0.0, 1.0, 0.0]), atol=1e-12)
+
+    app_logic.trajectoryRefocusFlipAngleDegrees = 170.0
+    _time, imperfect_weights = app_logic.compute_imperfect_refocus_pathway_weights(np.array([0.0, 2.0]))
+
+    assert imperfect_weights[0, 1] > 0.0
+    assert imperfect_weights[1, 1] > 0.0
+    assert imperfect_weights[2, 1] > 0.0
+
+
+def test_imperfect_coherence_branches_keep_distinct_rf_histories(app_logic: GUIapp) -> None:
+    app_logic.trajectoryRefocusTimes = [1.0, 2.0]
+    app_logic.trajectoryRefocusFlipAngleDegrees = 170.0
+
+    time, branches = app_logic.compute_imperfect_coherence_branches(np.array([0.0, 3.0]))
+
+    assert np.array_equal(time, np.array([0.0, 1.0, 2.0, 3.0]))
+    assert len(branches) > 1
+    assert all(len(branch["data"]) == len(time) for branch in branches)
+    assert len({branch["label"] for branch in branches}) == len(branches)
 
 
 def test_coherence_channel_keeps_only_gradient_time_extent(app_logic: GUIapp) -> None:
@@ -966,6 +1009,26 @@ def test_detect_rf_pulse_descriptors_records_repeatable_pulse_signatures(app_log
     assert pulses[0]["area"] == pulses[1]["area"] == 0.5
 
 
+def test_calibrated_refocus_sources_separate_diffusion_and_rare_train(app_logic: GUIapp) -> None:
+    app_logic.rfPulseCalibrations = [
+        {"name": "PVM_DwRfcPulse1", "duration": 1.7e-3, "flip_angle": 180.0},
+        {"name": "ExcPulse1", "duration": 2.1e-3, "flip_angle": 90.0},
+        {"name": "RefPulse1", "duration": 1.7e-3, "flip_angle": 180.0},
+    ]
+    app_logic.detect_rf_pulse_descriptors = lambda: [
+        {"focus": 1.0, "duration": 2.1e-3},
+        {"focus": 2.0, "duration": 1.7e-3},
+        {"focus": 3.0, "duration": 1.7e-3},
+        {"focus": 4.0, "duration": 1.7e-3},
+    ]
+
+    app_logic.apply_calibrated_refocus_flips()
+
+    assert app_logic.trajectoryFlipSources[2.0] == "Method: PVM_DwRfcPulse1 (180°)"
+    assert app_logic.trajectoryFlipSources[3.0] == "Method: RefPulse1 (180°)"
+    assert app_logic.trajectoryFlipSources[4.0] == "Method: RefPulse1 (180°)"
+
+
 def test_trajectory_flip_markers_are_refreshed_only_on_trajectory_plots(app_logic: GUIapp) -> None:
     app_logic.trajectoryRefocusTimes = [2.0, 1.0]
     app_logic.channels = [
@@ -1011,7 +1074,7 @@ def test_trajectory_echo_and_acquisition_window_are_marked(app_logic: GUIapp) ->
     assert app_logic.detect_acquisition_windows() == [(1.5, 2.5)]
     assert app_logic.detect_trajectory_echoes() == [2.0]
     assert app_logic.plots[0].regions == [(1.5, 2.5, "acquisition_window")]
-    assert (2.0, "E1 in ADC", "#006b3c") in app_logic.plots[0].markers
+    assert (2.0, "Echo in ADC", "#006b3c") in app_logic.plots[0].markers
 
 
 def test_trajectory_zero_marker_is_added_to_derived_coherence_plots(app_logic: GUIapp) -> None:

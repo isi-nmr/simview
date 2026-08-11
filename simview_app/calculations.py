@@ -184,11 +184,14 @@ class CalculationMixin:
                 if np.isfinite(float(time_value))
             },
         )
-        if not refocus_times or time.size == 0 or trajectory.size == 0:
+        if time.size == 0 or trajectory.size == 0:
             return trajectory
 
         time_array = np.asarray(time, dtype=float)
         trajectory_array = np.asarray(trajectory, dtype=float)
+        reset_times = self.get_trajectory_excitation_times(time_array)
+        if not refocus_times and reset_times.size == 0:
+            return trajectory
         anchor_time = getattr(self, "trajectoryZeroReferenceTime", None)
         if anchor_time is None:
             anchor_time = float(time_array[0])
@@ -198,7 +201,7 @@ class CalculationMixin:
             value for value in refocus_times if float(time_array[0]) <= value <= float(time_array[-1])
         ]
         integration_times = np.unique(
-            np.concatenate((time_array, np.asarray(in_range_refocuses, dtype=float), [anchor_time])),
+            np.concatenate((time_array, np.asarray(in_range_refocuses, dtype=float), reset_times, [anchor_time])),
         )
         integration_values = np.interp(integration_times, time_array, trajectory_array)
 
@@ -218,7 +221,47 @@ class CalculationMixin:
         anchor_index = int(np.searchsorted(integration_times, anchor_time))
         anchor_value = float(np.interp(anchor_time, time_array, trajectory_array))
         integrated += anchor_value - integrated[anchor_index]
+
+        # Every excitation begins a new repetition block.  Its coherence
+        # trajectory has a new origin, so neither residual moment nor refocus
+        # parity is allowed to carry through into the next TR.
+        for reset_index, reset_time in enumerate(reset_times):
+            start_index = int(np.searchsorted(integration_times, reset_time))
+            end_time = reset_times[reset_index + 1] if reset_index + 1 < reset_times.size else integration_times[-1]
+            end_index = int(np.searchsorted(integration_times, end_time, side="right") - 1)
+            if start_index > end_index:
+                continue
+            integrated[start_index] = 0.0
+            for index in range(start_index, end_index):
+                midpoint = 0.5 * (integration_times[index] + integration_times[index + 1])
+                flips_in_block = np.searchsorted(refocus_array, midpoint, side="right") - np.searchsorted(
+                    refocus_array, reset_time, side="right",
+                )
+                sign = -1.0 if flips_in_block % 2 else 1.0
+                integrated[index + 1] = integrated[index] + sign * (integration_values[index + 1] - integration_values[index])
         return np.interp(time_array, integration_times, integrated)
+
+    def get_trajectory_excitation_times(self, time: np.ndarray) -> np.ndarray:
+        """Find calibrated 90-degree RF foci that start independent TR blocks."""
+        if not hasattr(self, "detect_rf_pulse_descriptors"):
+            return np.asarray([], dtype=float)
+        calibrations = [
+            item for item in self.__dict__.get("rfPulseCalibrations", [])
+            if abs(float(item.get("flip_angle", 0.0)) - 90.0) <= 10.0
+        ]
+        if not calibrations:
+            return np.asarray([], dtype=float)
+        excitations = [
+            float(pulse["focus"])
+            for pulse in self.detect_rf_pulse_descriptors()
+            if any(
+                np.isclose(float(pulse["duration"]), float(calibration["duration"]), rtol=0.03, atol=2e-6)
+                for calibration in calibrations
+            )
+        ]
+        if not excitations:
+            return np.asarray([], dtype=float)
+        return np.asarray(sorted({value for value in excitations if time[0] <= value <= time[-1]}), dtype=float)
 
     def apply_trajectory_display_transforms(self, time: np.ndarray, trajectory: np.ndarray) -> np.ndarray:
         zeroed = self.zero_trajectory_to_reference(time, trajectory)
@@ -229,7 +272,11 @@ class CalculationMixin:
         source_data = np.asarray(raw_trajectory, dtype=float)
         if source_time.size == 0 or source_data.size == 0:
             return source_time, source_data
-        knot_parts = [source_time, np.asarray(getattr(self, "trajectoryRefocusTimes", []), dtype=float)]
+        knot_parts = [
+            source_time,
+            np.asarray(getattr(self, "trajectoryRefocusTimes", []), dtype=float),
+            self.get_trajectory_excitation_times(source_time),
+        ]
         if self.trajectoryZeroReferenceTime is not None:
             knot_parts.append(np.asarray([self.trajectoryZeroReferenceTime], dtype=float))
         display_time = np.unique(np.concatenate([part for part in knot_parts if part.size]))
@@ -273,6 +320,114 @@ class CalculationMixin:
             if flips_since_start % 2:
                 coherence_order[index] *= -1.0
         return profile_time, coherence_order
+
+    def compute_imperfect_refocus_pathway_weights(self, time: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return population weights for p-, p+, and p0 through the RF train.
+
+        A nominal refocusing pulse is modelled as a rotation of the coherence
+        basis.  At 180 degrees this reduces to the familiar p- <-> p+ swap.
+        Away from 180 degrees it retains transverse coherence and transfers a
+        portion through p0, making the otherwise hidden pathways inspectable.
+        """
+        profile_time, _order = self.compute_coherence_order_profile(time)
+        if profile_time.size == 0:
+            return profile_time, np.empty((3, 0), dtype=float)
+
+        excitation_time = profile_time[0]
+        if hasattr(self, "detect_rf_pulse_descriptors"):
+            descriptors = self.detect_rf_pulse_descriptors()
+            if descriptors:
+                excitation_time = float(descriptors[0]["focus"])
+        flip_times = {
+            float(value) for value in getattr(self, "trajectoryRefocusTimes", []) if np.isfinite(float(value))
+        }
+        theta = np.deg2rad(float(self.__dict__.get("trajectoryRefocusFlipAngleDegrees", 180.0)))
+        transfer = float(np.sin(theta / 2.0) ** 4)
+        retained = float(np.cos(theta / 2.0) ** 4)
+        transverse_to_zero = float(0.5 * np.sin(theta) ** 2)
+        zero_to_transverse = float(0.5 * np.sin(theta) ** 2)
+        zero_retained = float(np.cos(theta) ** 2)
+
+        # Rows are p-, p+, p0.  Longitudinal coherence is present before the
+        # excitation pulse; the selected transverse pathway begins at p-.
+        weights = np.zeros((3, profile_time.size), dtype=float)
+        state = (
+            np.asarray([1.0, 0.0, 0.0], dtype=float)
+            if excitation_time <= profile_time[0]
+            else np.asarray([0.0, 0.0, 1.0], dtype=float)
+        )
+        for index, time_value in enumerate(profile_time):
+            if time_value >= excitation_time and index > 0 and profile_time[index - 1] < excitation_time:
+                state = np.asarray([1.0, 0.0, 0.0], dtype=float)
+            if time_value in flip_times:
+                p_minus, p_plus, p_zero = state
+                state = np.asarray([
+                    retained * p_minus + transfer * p_plus + zero_to_transverse * p_zero,
+                    transfer * p_minus + retained * p_plus + zero_to_transverse * p_zero,
+                    transverse_to_zero * (p_minus + p_plus) + zero_retained * p_zero,
+                ], dtype=float)
+            weights[:, index] = state
+        return profile_time, weights
+
+    def compute_imperfect_coherence_branches(
+        self,
+        time: np.ndarray,
+        max_branches: int = 12,
+    ) -> tuple[np.ndarray, list[dict[str, object]]]:
+        """Build the strongest explicit coherence histories through the RF train.
+
+        The order values (p-, p+, p0) are states, not pathways.  A pathway is
+        a particular succession of those states, so branches are retained by
+        RF history and pruned only by their relative weight.
+        """
+        profile_time, _weights = self.compute_imperfect_refocus_pathway_weights(time)
+        if profile_time.size == 0:
+            return profile_time, []
+        excitation_time = profile_time[0]
+        if hasattr(self, "detect_rf_pulse_descriptors"):
+            descriptors = self.detect_rf_pulse_descriptors()
+            if descriptors:
+                excitation_time = float(descriptors[0]["focus"])
+        flip_times = {
+            float(value) for value in getattr(self, "trajectoryRefocusTimes", []) if np.isfinite(float(value))
+        }
+        theta = np.deg2rad(float(self.__dict__.get("trajectoryRefocusFlipAngleDegrees", 180.0)))
+        transitions = {
+            -1: ((1, np.sin(theta / 2.0) ** 4), (-1, np.cos(theta / 2.0) ** 4), (0, 0.5 * np.sin(theta) ** 2)),
+            1: ((-1, np.sin(theta / 2.0) ** 4), (1, np.cos(theta / 2.0) ** 4), (0, 0.5 * np.sin(theta) ** 2)),
+            0: ((-1, 0.5 * np.sin(theta) ** 2), (1, 0.5 * np.sin(theta) ** 2), (0, np.cos(theta) ** 2)),
+        }
+        name = {-1: "p−", 0: "p0", 1: "p+"}
+        branches: list[dict[str, object]] = [{"order": 0, "weight": 1.0, "history": [], "data": []}]
+        for index, time_value in enumerate(profile_time):
+            if time_value >= excitation_time and (index == 0 or profile_time[index - 1] < excitation_time):
+                branches = [{"order": -1, "weight": 1.0, "history": ["p−"], "data": [0.0] * index}]
+            if time_value in flip_times:
+                next_branches: list[dict[str, object]] = []
+                for branch in branches:
+                    for destination, factor in transitions[int(branch["order"])]:
+                        if factor <= 1e-14:
+                            continue
+                        next_branches.append({
+                            "order": destination,
+                            "weight": float(branch["weight"]) * float(factor),
+                            "history": [*branch["history"], name[destination]],
+                            "data": [*branch["data"], destination],
+                        })
+                branches = sorted(next_branches, key=lambda item: float(item["weight"]), reverse=True)[:max_branches]
+            else:
+                for branch in branches:
+                    branch["data"].append(int(branch["order"]))
+
+        result: list[dict[str, object]] = []
+        for index, branch in enumerate(branches, start=1):
+            history = " → ".join(str(value) for value in branch["history"])
+            result.append({
+                "label": f"Path {index} ({float(branch['weight']):.3g}) · {history}",
+                "weight": float(branch["weight"]),
+                "data": np.asarray(branch["data"], dtype=float),
+            })
+        return profile_time, result
 
     def get_nco_channel_role(self, line: dict) -> tuple[str, str] | None:
         if line.get("type") != "NCO":
@@ -439,17 +594,30 @@ class CalculationMixin:
 
     def update_coherence_order_in_place(self) -> None:
         for channel, plot in zip(self.channels, self.plots, strict=False):
-            if not channel or channel[0].get("chanLabel") not in {"Coherence Order", "Candidate Coherence Pathways"}:
+            if not channel or channel[0].get("chanLabel") not in {
+                "Coherence Order", "Candidate Coherence Pathways", "Imperfect RF Pathway Weights",
+            }:
                 continue
             line = channel[0]
             source_time = np.asarray(line.get("source_time", line.get("t", [])), dtype=float)
             profile_time, coherence_order = self.compute_coherence_order_profile(source_time)
+            _weight_time, pathway_weights = self.compute_imperfect_refocus_pathway_weights(source_time)
+            _branch_time, branches = self.compute_imperfect_coherence_branches(source_time)
             for line_index, path_line in enumerate(channel):
                 path_line["t"] = profile_time
                 key = str(path_line.get("key", ""))
-                path_line["data"] = (
-                    -coherence_order if key == "p+" else np.zeros_like(coherence_order) if key == "p0" else coherence_order
-                )
+                if channel[0].get("chanLabel") == "Imperfect RF Pathway Weights":
+                    weight_index = {"p-": 0, "p+": 1, "p0": 2}.get(key, 0)
+                    path_line["data"] = pathway_weights[weight_index]
+                elif channel[0].get("chanLabel") == "Candidate Coherence Pathways":
+                    if line_index >= len(branches):
+                        continue
+                    path_line["data"] = np.asarray(branches[line_index]["data"], dtype=float)
+                    path_line["label"] = str(branches[line_index]["label"])
+                else:
+                    path_line["data"] = (
+                        -coherence_order if key == "p+" else np.zeros_like(coherence_order) if key == "p0" else coherence_order
+                    )
                 if line_index >= len(plot.managed_curves):
                     continue
                 step_time = np.repeat(profile_time, 2)[1:]
@@ -683,28 +851,41 @@ class CalculationMixin:
                     },
                 ],
             )
+            pathway_time, pathway_weights = self.compute_imperfect_refocus_pathway_weights(coherence_source_time)
             derived_channels.append(
                 [
                     {
-                        "chanLabel": "Candidate Coherence Pathways",
-                        "label": "p− (selected)", "type": "coherence_pathway", "ind": "p-", "key": "p-",
-                        "plotType": "mag", "units": "", "source_time": coherence_source_time.copy(),
-                        "t": coherence_time, "data": coherence_order, "annotations": [], "pen": "m", "drawStyle": "step", "show": False,
+                        "chanLabel": "Imperfect RF Pathway Weights", "label": "p− weight", "type": "coherence_pathway",
+                        "ind": "p-", "key": "p-", "plotType": "mag", "units": "relative weight",
+                        "source_time": coherence_source_time.copy(), "t": pathway_time, "data": pathway_weights[0],
+                        "annotations": [], "pen": "m", "drawStyle": "step", "show": False,
                     },
                     {
-                        "chanLabel": "Candidate Coherence Pathways",
-                        "label": "p+ (conjugate)", "type": "coherence_pathway", "ind": "p+", "key": "p+",
-                        "plotType": "mag", "units": "", "source_time": coherence_source_time.copy(),
-                        "t": coherence_time, "data": -coherence_order, "annotations": [], "pen": "c", "drawStyle": "step", "show": False,
+                        "chanLabel": "Imperfect RF Pathway Weights", "label": "p+ weight", "type": "coherence_pathway",
+                        "ind": "p+", "key": "p+", "plotType": "mag", "units": "relative weight",
+                        "source_time": coherence_source_time.copy(), "t": pathway_time, "data": pathway_weights[1],
+                        "annotations": [], "pen": "c", "drawStyle": "step", "show": False,
                     },
                     {
-                        "chanLabel": "Candidate Coherence Pathways",
-                        "label": "p0 (longitudinal)", "type": "coherence_pathway", "ind": "p0", "key": "p0",
-                        "plotType": "mag", "units": "", "source_time": coherence_source_time.copy(),
-                        "t": coherence_time, "data": np.zeros_like(coherence_order), "annotations": [], "pen": "y", "drawStyle": "step", "show": False,
+                        "chanLabel": "Imperfect RF Pathway Weights", "label": "p0 weight", "type": "coherence_pathway",
+                        "ind": "p0", "key": "p0", "plotType": "mag", "units": "relative weight",
+                        "source_time": coherence_source_time.copy(), "t": pathway_time, "data": pathway_weights[2],
+                        "annotations": [], "pen": "y", "drawStyle": "step", "show": False,
                     },
                 ],
             )
+            branch_time, branches = self.compute_imperfect_coherence_branches(coherence_source_time)
+            branch_pens = ("m", "c", "y", "g", "r", "b")
+            derived_channels.append([
+                {
+                    "chanLabel": "Candidate Coherence Pathways", "label": str(branch["label"]),
+                    "type": "coherence_pathway", "ind": str(index), "key": f"path{index}",
+                    "plotType": "mag", "units": "", "source_time": coherence_source_time.copy(),
+                    "t": branch_time, "data": np.asarray(branch["data"], dtype=float), "annotations": [],
+                    "pen": branch_pens[index % len(branch_pens)], "drawStyle": "step", "show": False,
+                }
+                for index, branch in enumerate(branches)
+            ])
         if duty_cycle_channel:
             derived_channels.append(duty_cycle_channel)
 

@@ -235,6 +235,9 @@ class GUIapp(
             self.settings.value("trajectoryEchoRelativeTolerance", 1e-2, type=float),
         )
         self.trajectoryEchoRelativeTolerance = max(self.trajectoryEchoRelativeTolerance, 0.0)
+        self.trajectoryRefocusFlipAngleDegrees = float(
+            self.settings.value("trajectoryRefocusFlipAngleDegrees", 180.0, type=float),
+        )
         stored_trajectory_zero = self.settings.value("trajectoryZeroReferenceTime", None)
         self.trajectoryZeroReferenceTime = (
             float(stored_trajectory_zero) if stored_trajectory_zero not in {None, ""} else None
@@ -390,6 +393,13 @@ class GUIapp(
         self.trajectoryEchoToleranceSpinBox.setSuffix(" % of peak |K|")
         self.trajectoryEchoToleranceSpinBox.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.trajectoryEchoToleranceSpinBox.setValue(self.trajectoryEchoRelativeTolerance * 100.0)
+        self.trajectoryRefocusFlipAngleSpinBox = QtWidgets.QDoubleSpinBox()
+        self.trajectoryRefocusFlipAngleSpinBox.setDecimals(2)
+        self.trajectoryRefocusFlipAngleSpinBox.setRange(0.0, 360.0)
+        self.trajectoryRefocusFlipAngleSpinBox.setSingleStep(1.0)
+        self.trajectoryRefocusFlipAngleSpinBox.setSuffix(" °")
+        self.trajectoryRefocusFlipAngleSpinBox.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.trajectoryRefocusFlipAngleSpinBox.setValue(self.trajectoryRefocusFlipAngleDegrees)
         self.gradientDisplayUnitsComboBox = QtWidgets.QComboBox()
         self.gradientDisplayUnitsComboBox.addItem("Percent", "percent")
         self.gradientDisplayUnitsComboBox.addItem("Hz/mm", "hz_per_mm")
@@ -431,6 +441,7 @@ class GUIapp(
         derivedSignalsLayout = QtWidgets.QFormLayout(derivedSignalsGroup)
         derivedSignalsLayout.addRow("Startup Padding", self.derivedSignalStartupPaddingSpinBox)
         derivedSignalsLayout.addRow("Echo Tolerance", self.trajectoryEchoToleranceSpinBox)
+        derivedSignalsLayout.addRow("Refocus Flip Angle", self.trajectoryRefocusFlipAngleSpinBox)
 
         flipGroup = QtWidgets.QGroupBox("Coherence Flips")
         flipLayout = QtWidgets.QVBoxLayout(flipGroup)
