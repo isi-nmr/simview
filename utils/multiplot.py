@@ -20,7 +20,7 @@ def makePens()->tuple[list, dict]:
 
     pens = [penR, penG, penB, penY, penC, penM, penO, penP, penTeal, penPink, penGray, penBrown]
 
-    penDict = {"r": penR, "g": penG, "b": penB, "y": penY}
+    penDict = {"r": penR, "g": penG, "b": penB, "y": penY, "c": penC, "m": penM}
 
     return pens, penDict
 

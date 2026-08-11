@@ -2,7 +2,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QPoint, QPointF, Qt, QTimer
 from PyQt6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QResizeEvent, QShowEvent, QWheelEvent
-from PyQt6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QToolTip
 
 
 class TextItemWithBg(pg.TextItem):
@@ -32,6 +32,7 @@ class CursorPlot(pg.PlotWidget):
         self._resize_in_progress = False
         self._refresh_in_progress = False
         self.annotation_items: list[dict[str, object]] = []
+        self.overlay_region_items: list[dict[str, object]] = []
         self.change_tick_items: list[dict[str, object]] = []
         super().__init__(*args, **kwargs)
 
@@ -193,7 +194,14 @@ class CursorPlot(pg.PlotWidget):
             self.temp_text.bg_color = self.get_measurement_label_bg()
             self.temp_text.setColor(axis_color)
 
-    def add_annotation_marker(self, time_value: float, text_value: str, *, color: str = "r") -> None:
+    def add_annotation_marker(
+        self,
+        time_value: float,
+        text_value: str,
+        *,
+        color: str = "r",
+        group: str | None = None,
+    ) -> None:
         annotation_line = pg.InfiniteLine(
             pos=time_value,
             angle=90,
@@ -219,9 +227,47 @@ class CursorPlot(pg.PlotWidget):
                 "time": float(time_value),
                 "line": annotation_line,
                 "text": annotation_text,
+                "group": group,
             },
         )
         self.refresh_annotation_positions()
+
+    def clear_annotation_markers(self, *, group: str | None = None) -> None:
+        retained_annotations: list[dict[str, object]] = []
+        for annotation in self.annotation_items:
+            if group is not None and annotation.get("group") != group:
+                retained_annotations.append(annotation)
+                continue
+            self.removeItem(annotation["line"])
+            self.removeItem(annotation["text"])
+        self.annotation_items = retained_annotations
+
+    def add_overlay_region(
+        self,
+        start_time: float,
+        end_time: float,
+        *,
+        color: tuple[int, int, int, int] = (50, 140, 255, 45),
+        group: str | None = None,
+    ) -> None:
+        region = pg.LinearRegionItem(
+            values=(float(start_time), float(end_time)),
+            movable=False,
+            brush=pg.mkBrush(*color),
+            pen=pg.mkPen(None),
+        )
+        region.setZValue(-10)
+        self.addItem(region, ignoreBounds=True)
+        self.overlay_region_items.append({"item": region, "group": group})
+
+    def clear_overlay_regions(self, *, group: str | None = None) -> None:
+        retained_regions: list[dict[str, object]] = []
+        for overlay in self.overlay_region_items:
+            if group is not None and overlay.get("group") != group:
+                retained_regions.append(overlay)
+                continue
+            self.removeItem(overlay["item"])
+        self.overlay_region_items = retained_regions
 
     def refresh_annotation_positions(self, *args: object) -> None:
         if not self.annotation_items:
@@ -690,16 +736,59 @@ class CursorPlot(pg.PlotWidget):
         # Loop over all curves to find the nearest point
 
         label_parts = []
+        main_window = self.get_main_window()
+        trajectory_labels = {"Gradient Trajectory", "Gradient Trajectory Residual"}
+        plot_index = main_window.plots.index(self) if main_window is not None and self in main_window.plots else -1
+        is_interpolated_trajectory = (
+            plot_index >= 0
+            and plot_index < len(main_window.channels)
+            and bool(main_window.channels[plot_index])
+            and main_window.channels[plot_index][0].get("chanLabel") in trajectory_labels
+        )
         for name, cx, cy in self.curve_cache:
-            nearest_idx = max(np.searchsorted(cx, x_val, side="right") - 1, 0)
-            y_value = cy[min(nearest_idx + 1, cy.size - 1)]
+            if is_interpolated_trajectory and cx.size and cy.size:
+                y_value = float(np.interp(x_val, cx, cy))
+            else:
+                nearest_idx = max(np.searchsorted(cx, x_val, side="right") - 1, 0)
+                y_value = cy[min(nearest_idx + 1, cy.size - 1)]
             label_parts.append(f"{name}:{y_value:.2f}")
 
         self.point_label.setText(" ".join(label_parts))
         self.point_label.setPos(x_val, y_val)
 
-        main_window = self.get_main_window()
         if main_window is not None:
+            plot_index = main_window.plots.index(self) if self in main_window.plots else -1
+            is_rf_plot = (
+                plot_index >= 0
+                and plot_index < len(main_window.channels)
+                and main_window.is_rf_amplitude_channel(main_window.channels[plot_index])
+            )
+            if is_rf_plot:
+                pulse = next(
+                    (
+                        descriptor for descriptor in main_window.detect_rf_pulse_descriptors()
+                        if descriptor["start"] <= x_display <= descriptor["end"]
+                    ),
+                    None,
+                )
+                if pulse is not None:
+                    calibration = next(
+                        (
+                            item for item in getattr(main_window, "rfPulseCalibrations", [])
+                            if np.isclose(float(item["duration"]), float(pulse["duration"]), rtol=0.03, atol=2e-6)
+                        ),
+                        None,
+                    )
+                    details = [
+                        f"RF pulse (NCO {pulse['nco']})",
+                        f"Duration: {main_window.format_time(float(pulse['duration']))}",
+                        f"RF area: {float(pulse['area']):.5g}",
+                    ]
+                    if calibration is not None:
+                        details.append(f"Calibration: {calibration['name']} ({float(calibration['flip_angle']):.0f}°)")
+                    QToolTip.showText(self.mapToGlobal(pos.toPoint()), "\n".join(details), self)
+                else:
+                    QToolTip.hideText()
             for other in main_window.plots:
                 other.cursor_line.setPos(x_display)
                 # Update timestamp label at bottom-right corner

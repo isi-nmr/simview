@@ -24,6 +24,43 @@ def _get_bruker_pw_reference_watts() -> float:
     return value
 
 
+def find_origin_acquisition_path(sim_path: str) -> Path | None:
+    for output_path in sorted(Path(sim_path).glob("*.output")):
+        try:
+            output_text = output_path.read_text(errors="replace")
+        except OSError:
+            continue
+        match = re.search(r"pulse program:\s*(.+?)/pulseprogram\.precomp\s*$", output_text, re.MULTILINE)
+        if match is not None:
+            acquisition_path = Path(match.group(1))
+            if (acquisition_path / "method").is_file() and (acquisition_path / "acqp").is_file():
+                return acquisition_path
+    return None
+
+
+def read_origin_rf_pulse_calibrations(sim_path: str) -> tuple[str | None, list[dict[str, object]]]:
+    acquisition_path = find_origin_acquisition_path(sim_path)
+    if acquisition_path is None:
+        return None, []
+    try:
+        method_text = (acquisition_path / "method").read_text(errors="replace")
+    except OSError:
+        return str(acquisition_path), []
+    calibrations: list[dict[str, object]] = []
+    pattern = re.compile(r"^##\$(\w*(?:Exc|Ref|Rfc)Pulse\w*)=\(([^)]*)\)", re.MULTILINE)
+    for match in pattern.finditer(method_text):
+        fields = [field.strip() for field in match.group(2).split(",")]
+        if len(fields) < 3:
+            continue
+        try:
+            duration_seconds, flip_angle = float(fields[0]) * 1e-3, float(fields[2])
+        except ValueError:
+            continue
+        if duration_seconds > 0 and flip_angle > 0:
+            calibrations.append({"name": match.group(1), "duration": duration_seconds, "flip_angle": flip_angle})
+    return str(acquisition_path), calibrations
+
+
 def bruker_pw_attenuation_db_to_watts(attenuation_db: np.ndarray | float, reference_watts: float) -> np.ndarray:
     att = np.asarray(attenuation_db, dtype=float)
     # Bruker "pw" is attenuation in dB, so linear power scales by 10^(-dB/10).
@@ -55,7 +92,9 @@ def _is_acquisition_end_event(event: Mapping[str, object]) -> bool:
 
 
 def _is_sample_acquisition_end_event(event: Mapping[str, object]) -> bool:
-    return str(event.get("ln", "")) == "10000001"
+    # Bruker versions use different acquisition-job prefixes (for example
+    # 10000001 and 11000001); the common suffix identifies sample completion.
+    return bool(re.fullmatch(r"1\d{6}1", str(event.get("ln", ""))))
 
 
 def read_fcube_job_line_map(path: str, fcube_stem: str) -> dict[str, str]:
@@ -87,7 +126,7 @@ def annotate_fcube_event_jobs(info: dict[str, object], job_line_map: Mapping[str
         if line_number in job_line_map:
             current_job = job_line_map[line_number]
             event["job"] = current_job
-        elif current_job is not None and ("rgp" in event or str(event.get("ln", "")) == "10000001"):
+        elif current_job is not None and ("rgp" in event or _is_sample_acquisition_end_event(event)):
             event["job"] = current_job
 
 
@@ -155,6 +194,34 @@ def extract_acquisition_windows(event_infos: list[dict[str, object]]) -> dict[st
 
 def extract_sample_acquisition_windows(event_infos: list[dict[str, object]]) -> dict[str, list[tuple[float, float]]]:
     return extract_best_windows(event_infos, _is_sample_acquisition_end_event)
+
+
+def extract_sample_acquisition_window_details(event_infos: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return de-duplicated sample windows with the originating job-line type."""
+    details: dict[tuple[str, float, float], dict[str, object]] = {}
+    for info in event_infos:
+        pending: dict[str, list[dict[str, object]]] = {}
+        for event in info.get("events", []):
+            if not isinstance(event, dict) or "t" not in event:
+                continue
+            nco = str(event.get("nco", "1"))
+            if "rgp" in event and _is_rgp_active(event["rgp"]):
+                pending.setdefault(nco, []).append(event)
+            if not _is_sample_acquisition_end_event(event):
+                continue
+            starts = pending.get(nco, [])
+            if not starts:
+                continue
+            start = starts.pop(0)
+            start_time, end_time = float(start["t"]), float(event["t"])
+            if end_time <= start_time:
+                continue
+            line = str(start.get("ln", ""))
+            job_type = f"job {line[:2]}" if len(line) >= 2 else "ADC"
+            details[(nco, start_time, end_time)] = {
+                "nco": nco, "start": start_time, "end": end_time, "job_type": job_type,
+            }
+    return sorted(details.values(), key=lambda item: (float(item["start"]), str(item["nco"])))
 
 
 def extract_best_windows(
@@ -790,6 +857,7 @@ def parseBrkrChannels(
     pw_reference_watts: float | None = None,
 ) -> tuple[list[list[dict]], dict[str, object]]:
     last_progress_value = 0
+    origin_path, rf_pulse_calibrations = read_origin_rf_pulse_calibrations(path)
 
     def emit_progress(value: int, label: str) -> None:
         nonlocal last_progress_value
@@ -826,6 +894,7 @@ def parseBrkrChannels(
     ))
     apply_acquisition_windows_to_rgp(ncos, extract_acquisition_windows(event_infos))
     apply_windows_to_nco_gate(ncos, extract_sample_acquisition_windows(event_infos), "acq")
+    info["sampleAcquisitionWindows"] = extract_sample_acquisition_window_details(event_infos)
     emit_progress(76, "Building event annotations")
     event_annotations = build_pulse_program_event_annotations(
         event_infos,
@@ -948,6 +1017,8 @@ def parseBrkrChannels(
         channels.append(gradient_channel)
 
     emit_progress(98, "Finalizing Bruker channels")
+    info["originAcquisitionPath"] = origin_path
+    info["rfPulseCalibrations"] = rf_pulse_calibrations
     return channels, info
 
 

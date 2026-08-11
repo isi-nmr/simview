@@ -188,27 +188,91 @@ class CalculationMixin:
             return trajectory
 
         time_array = np.asarray(time, dtype=float)
-        refocused = np.asarray(trajectory, dtype=float).copy()
-        for refocus_time in refocus_times:
-            if refocus_time > float(time_array[-1]):
-                continue
+        trajectory_array = np.asarray(trajectory, dtype=float)
+        anchor_time = getattr(self, "trajectoryZeroReferenceTime", None)
+        if anchor_time is None:
+            anchor_time = float(time_array[0])
+        anchor_time = float(np.clip(anchor_time, time_array[0], time_array[-1]))
 
-            current_value = float(
-                np.interp(
-                    refocus_time,
-                    time_array,
-                    refocused,
-                    left=float(refocused[0]),
-                    right=float(refocused[-1]),
-                ),
-            )
-            refocus_mask = time_array >= refocus_time
-            refocused[refocus_mask] -= 2.0 * current_value
-        return refocused
+        in_range_refocuses = [
+            value for value in refocus_times if float(time_array[0]) <= value <= float(time_array[-1])
+        ]
+        integration_times = np.unique(
+            np.concatenate((time_array, np.asarray(in_range_refocuses, dtype=float), [anchor_time])),
+        )
+        integration_values = np.interp(integration_times, time_array, trajectory_array)
+
+        # A refocus changes the sign of every subsequent gradient contribution.
+        # Integrating those signed increments from the original trajectory zero
+        # keeps the coherence path continuous instead of merely reflecting its
+        # accumulated value at each refocus event.
+        interval_midpoints = 0.5 * (integration_times[:-1] + integration_times[1:])
+        refocus_array = np.asarray(in_range_refocuses, dtype=float)
+        anchor_flip_count = int(np.searchsorted(refocus_array, anchor_time, side="right"))
+        midpoint_flip_counts = np.searchsorted(refocus_array, interval_midpoints, side="right")
+        crossed_refocuses = np.abs(midpoint_flip_counts - anchor_flip_count)
+        interval_signs = np.where(crossed_refocuses % 2 == 0, 1.0, -1.0)
+
+        signed_increments = np.diff(integration_values) * interval_signs
+        integrated = np.concatenate(([0.0], np.cumsum(signed_increments)))
+        anchor_index = int(np.searchsorted(integration_times, anchor_time))
+        anchor_value = float(np.interp(anchor_time, time_array, trajectory_array))
+        integrated += anchor_value - integrated[anchor_index]
+        return np.interp(time_array, integration_times, integrated)
 
     def apply_trajectory_display_transforms(self, time: np.ndarray, trajectory: np.ndarray) -> np.ndarray:
         zeroed = self.zero_trajectory_to_reference(time, trajectory)
         return self.apply_trajectory_refocuses(time, zeroed)
+
+    def get_trajectory_display_profile(self, time: np.ndarray, raw_trajectory: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        source_time = np.asarray(time, dtype=float)
+        source_data = np.asarray(raw_trajectory, dtype=float)
+        if source_time.size == 0 or source_data.size == 0:
+            return source_time, source_data
+        knot_parts = [source_time, np.asarray(getattr(self, "trajectoryRefocusTimes", []), dtype=float)]
+        if self.trajectoryZeroReferenceTime is not None:
+            knot_parts.append(np.asarray([self.trajectoryZeroReferenceTime], dtype=float))
+        display_time = np.unique(np.concatenate([part for part in knot_parts if part.size]))
+        display_time = display_time[(display_time >= source_time[0]) & (display_time <= source_time[-1])]
+        display_raw = np.interp(display_time, source_time, source_data)
+        return display_time, self.apply_trajectory_display_transforms(display_time, display_raw)
+
+    def compute_coherence_order_profile(self, time: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        time_array = np.asarray(time, dtype=float)
+        if time_array.size == 0:
+            return time_array, np.asarray([], dtype=float)
+
+        start_time = float(time_array[0])
+        end_time = float(time_array[-1])
+        anchor_time = getattr(self, "trajectoryZeroReferenceTime", None)
+        if anchor_time is None:
+            anchor_time = start_time
+        anchor_time = float(np.clip(anchor_time, start_time, end_time))
+        excitation_time = start_time
+        if hasattr(self, "detect_rf_pulse_descriptors"):
+            descriptors = self.detect_rf_pulse_descriptors()
+            if descriptors:
+                excitation_time = float(np.clip(float(descriptors[0]["focus"]), start_time, end_time))
+        flip_times = sorted(
+            {
+                float(value)
+                for value in getattr(self, "trajectoryRefocusTimes", [])
+                if np.isfinite(float(value)) and start_time <= float(value) <= end_time
+            },
+        )
+
+        profile_time = np.unique(np.asarray([start_time, excitation_time, *flip_times, end_time], dtype=float))
+        order_at_start = -1.0
+        if sum(start_time < value <= anchor_time for value in flip_times) % 2:
+            order_at_start = 1.0
+
+        coherence_order = np.full(profile_time.shape, order_at_start, dtype=float)
+        coherence_order[profile_time < excitation_time] = 0.0
+        for index, time_value in enumerate(profile_time):
+            flips_since_start = sum(value <= time_value for value in flip_times)
+            if flips_since_start % 2:
+                coherence_order[index] *= -1.0
+        return profile_time, coherence_order
 
     def get_nco_channel_role(self, line: dict) -> tuple[str, str] | None:
         if line.get("type") != "NCO":
@@ -358,12 +422,116 @@ class CalculationMixin:
 
             for line_index, line in enumerate(channel):
                 raw_trajectory = np.asarray(line.get("raw_data", line.get("data", [])), dtype=float)
-                time = np.asarray(line.get("t", []), dtype=float)
-                display_trajectory = self.apply_trajectory_display_transforms(time, raw_trajectory)
+                source_time = np.asarray(line.get("raw_t", line.get("t", [])), dtype=float)
+                time, display_trajectory = self.get_trajectory_display_profile(source_time, raw_trajectory)
+                line["raw_t"] = source_time
+                line["t"] = time
                 line["data"] = display_trajectory
 
                 if line_index < len(plot.managed_curves):
                     plot.update_managed_curve(line_index, time, display_trajectory)
+
+        self.update_coherence_order_in_place()
+        self.update_trajectory_residual_in_place()
+
+        if hasattr(self, "refresh_trajectory_flip_markers"):
+            self.refresh_trajectory_flip_markers()
+
+    def update_coherence_order_in_place(self) -> None:
+        for channel, plot in zip(self.channels, self.plots, strict=False):
+            if not channel or channel[0].get("chanLabel") not in {"Coherence Order", "Candidate Coherence Pathways"}:
+                continue
+            line = channel[0]
+            source_time = np.asarray(line.get("source_time", line.get("t", [])), dtype=float)
+            profile_time, coherence_order = self.compute_coherence_order_profile(source_time)
+            for line_index, path_line in enumerate(channel):
+                path_line["t"] = profile_time
+                key = str(path_line.get("key", ""))
+                path_line["data"] = (
+                    -coherence_order if key == "p+" else np.zeros_like(coherence_order) if key == "p0" else coherence_order
+                )
+                if line_index >= len(plot.managed_curves):
+                    continue
+                step_time = np.repeat(profile_time, 2)[1:]
+                step_order = np.repeat(path_line["data"], 2)[:-1]
+                plot.update_managed_curve(line_index, step_time, step_order)
+
+    def compute_trajectory_residual(self, trajectory_channel: list[dict]) -> tuple[np.ndarray, np.ndarray]:
+        if not trajectory_channel:
+            return np.asarray([], dtype=float), np.asarray([], dtype=float)
+        knot_parts = [np.asarray(line.get("t", []), dtype=float) for line in trajectory_channel]
+        knot_parts.append(np.asarray(getattr(self, "trajectoryRefocusTimes", []), dtype=float))
+        if self.trajectoryZeroReferenceTime is not None:
+            knot_parts.append(np.asarray([self.trajectoryZeroReferenceTime], dtype=float))
+        time = np.unique(np.concatenate([part for part in knot_parts if part.size])) if any(
+            part.size for part in knot_parts
+        ) else np.asarray([], dtype=float)
+        components: list[np.ndarray] = []
+        for line in trajectory_channel:
+            line_time = np.asarray(line.get("t", []), dtype=float)
+            line_data = np.asarray(line.get("data", line.get("raw_data", [])), dtype=float)
+            if line_time.size and line_data.size:
+                components.append(np.interp(time, line_time, line_data))
+        if not components:
+            return time, np.zeros_like(time)
+
+        # |K| is not linear between two linearly interpolated vector samples.
+        # Insert each interval's analytic closest approach to the origin so the
+        # displayed magnitude reaches the same minima as the Kx/Ky/Kz curves.
+        vectors = np.vstack(components).T
+        interval_duration = np.diff(time)
+        deltas = np.diff(vectors, axis=0)
+        denominators = np.sum(deltas * deltas, axis=1)
+        fractions = np.divide(
+            -np.sum(vectors[:-1] * deltas, axis=1),
+            denominators,
+            out=np.zeros_like(denominators),
+            where=denominators > 1e-30,
+        )
+        interior = (fractions > 1e-12) & (fractions < 1.0 - 1e-12) & (interval_duration > 0)
+        knot_times = [time]
+        if np.any(interior):
+            knot_times.append(time[:-1][interior] + fractions[interior] * interval_duration[interior])
+        for component_index in range(vectors.shape[1]):
+            component_delta = deltas[:, component_index]
+            component_fraction = np.divide(
+                -vectors[:-1, component_index],
+                component_delta,
+                out=np.zeros_like(component_delta),
+                where=np.abs(component_delta) > 1e-30,
+            )
+            component_interior = (
+                (component_fraction > 1e-12)
+                & (component_fraction < 1.0 - 1e-12)
+                & (interval_duration > 0)
+            )
+            if np.any(component_interior):
+                knot_times.append(
+                    time[:-1][component_interior] + component_fraction[component_interior] * interval_duration[component_interior],
+                )
+        if len(knot_times) > 1:
+            time = np.unique(np.concatenate(knot_times))
+            vectors = np.vstack([np.interp(time, np.asarray(line.get("t", []), dtype=float), np.asarray(line.get("data", line.get("raw_data", [])), dtype=float)) for line in trajectory_channel]).T
+        return time, np.linalg.norm(vectors, axis=1)
+
+    def update_trajectory_residual_in_place(self) -> None:
+        trajectory = next(
+            (channel for channel in self.channels if channel and channel[0].get("chanLabel") == "Gradient Trajectory"),
+            [],
+        )
+        time, residual = self.compute_trajectory_residual(trajectory)
+        for channel, plot in zip(self.channels, self.plots, strict=False):
+            if channel and channel[0].get("chanLabel") == "Gradient Trajectory Residual":
+                channel[0]["t"] = time
+                channel[0]["data"] = residual
+                if plot.managed_curves:
+                    plot.update_managed_curve(0, time, residual)
+                    plot.managed_curves[0]["item"].setData(time, residual)
+                    # The residual gains interpolation knots at zero/flip times.
+                    # Refresh now so a visible plot cannot retain its pre-zeroed
+                    # downsampled rendering until the next view interaction.
+                    if hasattr(plot, "refresh_visible_curves"):
+                        plot.refresh_visible_curves()
 
     def build_gradient_derived_channels(self) -> list[list[dict]]:
         gradient_axes: dict[str, dict] = {}
@@ -384,6 +552,7 @@ class CalculationMixin:
         slew_channel: list[dict] = []
         trajectory_channel: list[dict] = []
         duty_cycle_channel: list[dict] = []
+        coherence_source_time: np.ndarray | None = None
 
         for axis in ("x", "y", "z"):
             if axis not in gradient_axes:
@@ -392,6 +561,11 @@ class CalculationMixin:
             source_line = gradient_axes[axis]
             _, pen = axis_meta[axis]
             time = np.asarray(source_line["t"], dtype=float)
+            if coherence_source_time is None and time.size > 0:
+                # Coherence order changes only at RF flips, so retaining the
+                # complete (potentially multi-million-sample) gradient clock is
+                # unnecessary. The profile builder inserts all flip times.
+                coherence_source_time = np.asarray([time[0], time[-1]], dtype=float)
             display_data = np.asarray(source_line["data"], dtype=float)
             display_units = str(source_line.get("units", "")).strip()
             physical_hz_per_mm = source_line.get("physical_hz_per_mm")
@@ -419,7 +593,7 @@ class CalculationMixin:
                 raw_traj_data = self.compute_gradient_trajectory(time, data)
                 traj_units = f"{display_units}*s" if display_units else "a.u.*s"
 
-            traj_data = self.apply_trajectory_display_transforms(traj_time, raw_traj_data)
+            display_traj_time, traj_data = self.get_trajectory_display_profile(traj_time, raw_traj_data)
             duty_cycle_time, duty_cycle_source = self.normalize_time_series(time, display_data)
             duty_cycle_data = self.compute_gradient_duty_cycle(duty_cycle_time, duty_cycle_source)
 
@@ -449,7 +623,8 @@ class CalculationMixin:
                     "key": f"T{axis}",
                     "plotType": "mag",
                     "units": traj_units,
-                    "t": traj_time,
+                    "raw_t": traj_time.copy(),
+                    "t": display_traj_time,
                     "raw_data": raw_traj_data.copy(),
                     "data": traj_data,
                     "annotations": [],
@@ -480,6 +655,56 @@ class CalculationMixin:
             derived_channels.append(slew_channel)
         if trajectory_channel:
             derived_channels.append(trajectory_channel)
+            residual_time, residual_data = self.compute_trajectory_residual(trajectory_channel)
+            derived_channels.append([{
+                "chanLabel": "Gradient Trajectory Residual", "label": "|K|", "type": "grads_derived",
+                "ind": "residual", "key": "Kmag", "plotType": "mag", "units": trajectory_channel[0]["units"],
+                "t": residual_time, "data": residual_data, "annotations": [], "pen": "c", "drawStyle": "line", "show": False,
+            }])
+        if coherence_source_time is not None:
+            coherence_time, coherence_order = self.compute_coherence_order_profile(coherence_source_time)
+            derived_channels.append(
+                [
+                    {
+                        "chanLabel": "Coherence Order",
+                        "label": "p(t)",
+                        "type": "coherence_order",
+                        "ind": "p",
+                        "key": "p",
+                        "plotType": "mag",
+                        "units": "",
+                        "source_time": coherence_source_time.copy(),
+                        "t": coherence_time,
+                        "data": coherence_order,
+                        "annotations": [],
+                        "pen": "m",
+                        "drawStyle": "step",
+                        "show": False,
+                    },
+                ],
+            )
+            derived_channels.append(
+                [
+                    {
+                        "chanLabel": "Candidate Coherence Pathways",
+                        "label": "p− (selected)", "type": "coherence_pathway", "ind": "p-", "key": "p-",
+                        "plotType": "mag", "units": "", "source_time": coherence_source_time.copy(),
+                        "t": coherence_time, "data": coherence_order, "annotations": [], "pen": "m", "drawStyle": "step", "show": False,
+                    },
+                    {
+                        "chanLabel": "Candidate Coherence Pathways",
+                        "label": "p+ (conjugate)", "type": "coherence_pathway", "ind": "p+", "key": "p+",
+                        "plotType": "mag", "units": "", "source_time": coherence_source_time.copy(),
+                        "t": coherence_time, "data": -coherence_order, "annotations": [], "pen": "c", "drawStyle": "step", "show": False,
+                    },
+                    {
+                        "chanLabel": "Candidate Coherence Pathways",
+                        "label": "p0 (longitudinal)", "type": "coherence_pathway", "ind": "p0", "key": "p0",
+                        "plotType": "mag", "units": "", "source_time": coherence_source_time.copy(),
+                        "t": coherence_time, "data": np.zeros_like(coherence_order), "annotations": [], "pen": "y", "drawStyle": "step", "show": False,
+                    },
+                ],
+            )
         if duty_cycle_channel:
             derived_channels.append(duty_cycle_channel)
 

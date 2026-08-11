@@ -59,6 +59,8 @@ class GUIapp(
         self.themeMode = "system"
         self.trajectoryZeroReferenceTime: float | None = None
         self.trajectoryRefocusTimes: list[float] = []
+        self.trajectoryFlipSources: dict[float, str] = {}
+        self.trajectoryEchoRelativeTolerance = 1e-2
         self.derivedSignalStartupPadding = 0.010
         self.inlineData = data
 
@@ -167,6 +169,10 @@ class GUIapp(
         self.refocusTrajectoryAtCursorAction.triggered.connect(self.refocus_trajectory_at_cursor)
         viewMenu.addAction(self.refocusTrajectoryAtCursorAction)
 
+        self.learnRefocusPulseAction = QtGui.QAction("Treat Hovered RF Pulse As 180°", self)
+        self.learnRefocusPulseAction.triggered.connect(self.learn_hovered_rf_pulse_as_refocus)
+        viewMenu.addAction(self.learnRefocusPulseAction)
+
         self.prevRfPulseAction = QtGui.QAction("Jump To Previous RF Pulse", self)
         self.prevRfPulseAction.triggered.connect(self.jump_to_previous_rf_pulse)
         viewMenu.addAction(self.prevRfPulseAction)
@@ -225,6 +231,10 @@ class GUIapp(
         self.splitGradientChannels = bool(self.settings.value("splitGradientChannels", False, type=bool))
         self.themeMode = str(self.settings.value("themeMode", "system")).lower()
         self.derivedSignalStartupPadding = float(self.settings.value("derivedSignalStartupPadding", 1e-2, type=float))
+        self.trajectoryEchoRelativeTolerance = float(
+            self.settings.value("trajectoryEchoRelativeTolerance", 1e-2, type=float),
+        )
+        self.trajectoryEchoRelativeTolerance = max(self.trajectoryEchoRelativeTolerance, 0.0)
         stored_trajectory_zero = self.settings.value("trajectoryZeroReferenceTime", None)
         self.trajectoryZeroReferenceTime = (
             float(stored_trajectory_zero) if stored_trajectory_zero not in {None, ""} else None
@@ -373,6 +383,13 @@ class GUIapp(
         self.derivedSignalStartupPaddingSpinBox.setSuffix(" s")
         self.derivedSignalStartupPaddingSpinBox.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.derivedSignalStartupPaddingSpinBox.setValue(self.derivedSignalStartupPadding)
+        self.trajectoryEchoToleranceSpinBox = QtWidgets.QDoubleSpinBox()
+        self.trajectoryEchoToleranceSpinBox.setDecimals(3)
+        self.trajectoryEchoToleranceSpinBox.setRange(0.0, 100.0)
+        self.trajectoryEchoToleranceSpinBox.setSingleStep(0.1)
+        self.trajectoryEchoToleranceSpinBox.setSuffix(" % of peak |K|")
+        self.trajectoryEchoToleranceSpinBox.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.trajectoryEchoToleranceSpinBox.setValue(self.trajectoryEchoRelativeTolerance * 100.0)
         self.gradientDisplayUnitsComboBox = QtWidgets.QComboBox()
         self.gradientDisplayUnitsComboBox.addItem("Percent", "percent")
         self.gradientDisplayUnitsComboBox.addItem("Hz/mm", "hz_per_mm")
@@ -413,15 +430,42 @@ class GUIapp(
         derivedSignalsGroup = QtWidgets.QGroupBox("Derived Signals")
         derivedSignalsLayout = QtWidgets.QFormLayout(derivedSignalsGroup)
         derivedSignalsLayout.addRow("Startup Padding", self.derivedSignalStartupPaddingSpinBox)
+        derivedSignalsLayout.addRow("Echo Tolerance", self.trajectoryEchoToleranceSpinBox)
+
+        flipGroup = QtWidgets.QGroupBox("Coherence Flips")
+        flipLayout = QtWidgets.QVBoxLayout(flipGroup)
+        self.trajectoryFlipListWidget = QtWidgets.QListWidget()
+        self.trajectoryFlipListWidget.itemDoubleClicked.connect(self.move_selected_trajectory_flip)
+        self.removeTrajectoryFlipButton = QtWidgets.QPushButton("Remove Selected")
+        self.removeTrajectoryFlipButton.clicked.connect(self.remove_selected_trajectory_flip)
+        self.moveTrajectoryFlipButton = QtWidgets.QPushButton("Move Selected")
+        self.moveTrajectoryFlipButton.clicked.connect(self.move_selected_trajectory_flip)
+        flipButtons = QtWidgets.QHBoxLayout()
+        flipButtons.addWidget(self.moveTrajectoryFlipButton)
+        flipButtons.addWidget(self.removeTrajectoryFlipButton)
+        flipLayout.addWidget(self.trajectoryFlipListWidget)
+        flipLayout.addLayout(flipButtons)
+
+        coherenceResultsGroup = QtWidgets.QGroupBox("Coherence Results")
+        coherenceResultsLayout = QtWidgets.QVBoxLayout(coherenceResultsGroup)
+        self.acquisitionJobLegendLabel = QtWidgets.QLabel()
+        self.acquisitionJobLegendLabel.setWordWrap(True)
+        self.echoResultsListWidget = QtWidgets.QListWidget()
+        self.echoResultsListWidget.itemDoubleClicked.connect(self.jump_to_echo_result)
+        coherenceResultsLayout.addWidget(self.acquisitionJobLegendLabel)
+        coherenceResultsLayout.addWidget(self.echoResultsListWidget)
 
         self.settingsLayout.addWidget(appearanceGroup)
         self.settingsLayout.addWidget(scannerGroup)
         self.settingsLayout.addWidget(derivedSignalsGroup)
+        self.settingsLayout.addWidget(flipGroup)
+        self.settingsLayout.addWidget(coherenceResultsGroup)
         self.settingsLayout.addWidget(self.applyScannerSettingsButton)
         self.settingsLayout.addStretch(1)
         self.gradientCalibrationSpinBox.valueChanged.connect(self.update_scanner_settings_display)
         self.nucleusGammaSpinBox.valueChanged.connect(self.update_scanner_settings_display)
         self.update_scanner_settings_display()
+        self.refresh_trajectory_flip_table()
 
         self.measurementsLayout.addWidget(self.measurementsHint)
         self.measurementsLayout.addWidget(self.measurementsListWidget)

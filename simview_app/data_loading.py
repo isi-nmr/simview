@@ -277,7 +277,9 @@ class DataLoadingMixin:
             plot.showCursor()
             plot.set_interaction_mode(self.interactionMode)
         self.update_rf_pulse_navigation_state()
+        self.apply_calibrated_refocus_flips()
         self.add_rf_pulse_focus_markers()
+        self.refresh_trajectory_flip_markers()
         self.update_status(cursor_time=None, measurement=self.currentMeasurement)
 
     def _start_bruker_load(self, path: str, progress: QtWidgets.QProgressDialog, load_id: int) -> None:
@@ -332,6 +334,9 @@ class DataLoadingMixin:
             info.get("lineEventNumbers"),
         )
         self.pulseProgramLineMapping = info.get("lineMapping", {})
+        self.acquisitionWindowDetails = list(info.get("sampleAcquisitionWindows", []))
+        self.originAcquisitionPath = info.get("originAcquisitionPath")
+        self.rfPulseCalibrations = list(info.get("rfPulseCalibrations", []))
         if source:
             self.setWindowTitle(f"{self.dataPath} originPPG: {source}")
 

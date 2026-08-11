@@ -530,6 +530,7 @@ class InteractionMixin:
         QtGui.QShortcut(QtGui.QKeySequence("E"), self, activated=self.snapMeasureAction.toggle)
         QtGui.QShortcut(QtGui.QKeySequence("T"), self, activated=self.zeroTrajectoryAtCursorAction.trigger)
         QtGui.QShortcut(QtGui.QKeySequence("F"), self, activated=self.refocusTrajectoryAtCursorAction.trigger)
+        QtGui.QShortcut(QtGui.QKeySequence("Shift+F"), self, activated=self.learnRefocusPulseAction.trigger)
         QtGui.QShortcut(QtGui.QKeySequence("J"), self, activated=self.jumpToPpgLineAction.trigger)
         QtGui.QShortcut(QtGui.QKeySequence("["), self, activated=self.jump_to_previous_rf_pulse)
         QtGui.QShortcut(QtGui.QKeySequence("]"), self, activated=self.jump_to_next_rf_pulse)
@@ -551,6 +552,7 @@ class InteractionMixin:
             "<b>E</b> Toggle measure snap to events<br>"
             "<b>T</b> Zero trajectory at cursor<br>"
             "<b>F</b> Add 180 refocus flip at cursor<br>"
+            "<b>Shift+F</b> Treat hovered RF pulse as 180°<br>"
             "<b>[ / ]</b> Jump previous / next RF pulse<br>"
             "<b>F1</b> Show this help<br><br>"
             "<b>Mouse controls</b><br><br>"
@@ -616,6 +618,9 @@ class InteractionMixin:
         if all(abs(refocus_time - existing_time) > 1e-15 for existing_time in self.trajectoryRefocusTimes):
             self.trajectoryRefocusTimes.append(refocus_time)
             self.trajectoryRefocusTimes.sort()
+            if not hasattr(self, "trajectoryFlipSources"):
+                self.trajectoryFlipSources = {}
+            self.trajectoryFlipSources[refocus_time] = "Manual"
         self.apply_trajectory_zero_in_place()
         self.update_status()
 
@@ -627,12 +632,14 @@ class InteractionMixin:
 
     def reset_trajectory_refocuses(self) -> None:
         self.trajectoryRefocusTimes = []
+        self.trajectoryFlipSources = {}
         self.apply_trajectory_zero_in_place()
         self.update_status()
 
     def reset_trajectory_transforms(self) -> None:
         self.trajectoryZeroReferenceTime = None
         self.trajectoryRefocusTimes = []
+        self.trajectoryFlipSources = {}
         self.settings.remove("trajectoryZeroReferenceTime")
         self.apply_trajectory_zero_in_place()
         self.update_status()
@@ -686,6 +693,87 @@ class InteractionMixin:
         pulse_starts, _pulse_focuses = self.detect_rf_pulse_windows()
         return pulse_starts
 
+    def detect_rf_pulse_descriptors(self) -> list[dict[str, float | str]]:
+        descriptors: list[dict[str, float | str]] = []
+        for channel in getattr(self, "channels", []):
+            for line in channel:
+                if str(line.get("type", "")).upper() != "NCO" or str(line.get("key", "")).lower() != "am":
+                    continue
+                time, amplitude = self.normalize_time_series(
+                    np.asarray(line.get("t", []), dtype=float), np.asarray(line.get("data", []), dtype=float),
+                )
+                active = amplitude > 1e-12
+                for start_index in np.flatnonzero(active & np.concatenate(([True], ~active[:-1]))):
+                    inactive = np.flatnonzero(~active[start_index + 1 :])
+                    end_index = start_index + 1 + int(inactive[0]) if inactive.size else time.size - 1
+                    if end_index <= start_index:
+                        continue
+                    start, end = float(time[start_index]), float(time[end_index])
+                    descriptors.append({
+                        "start": start, "end": end, "focus": (start + end) * 0.5, "duration": end - start,
+                        "area": float(np.trapezoid(amplitude[start_index : end_index + 1], time[start_index : end_index + 1])),
+                        "nco": str(line.get("ind", "")),
+                    })
+        return descriptors
+
+    def learn_hovered_rf_pulse_as_refocus(self) -> None:
+        if self.currentCursorTime is None:
+            dialog.showErrorMessage("Hover over an RF pulse before classifying it as 180°.")
+            return
+        pulses = self.detect_rf_pulse_descriptors()
+        selected = next((pulse for pulse in pulses if pulse["start"] <= self.currentCursorTime <= pulse["end"]), None)
+        if selected is None:
+            dialog.showErrorMessage("The cursor is not over a detected RF amplitude pulse.")
+            return
+        matching = [
+            pulse for pulse in pulses
+            if pulse["nco"] == selected["nco"]
+            and np.isclose(float(pulse["duration"]), float(selected["duration"]), rtol=1e-3, atol=1e-9)
+            and np.isclose(abs(float(pulse["area"])), abs(float(selected["area"])), rtol=1e-2, atol=1e-12)
+        ]
+        if not hasattr(self, "trajectoryFlipSources"):
+            self.trajectoryFlipSources = {}
+        added = 0
+        for pulse in matching:
+            focus_time = float(pulse["focus"])
+            if all(abs(focus_time - existing) > 1e-15 for existing in self.trajectoryRefocusTimes):
+                self.trajectoryRefocusTimes.append(focus_time)
+                self.trajectoryFlipSources[focus_time] = "RF 180 match"
+                added += 1
+        self.trajectoryRefocusTimes.sort()
+        self.apply_trajectory_zero_in_place()
+        self.update_status()
+        self.statusBar().showMessage(f"Added {added} matching 180° RF flip(s).", 4000)
+
+    def apply_calibrated_refocus_flips(self) -> None:
+        calibrations = [
+            calibration for calibration in getattr(self, "rfPulseCalibrations", [])
+            if abs(float(calibration.get("flip_angle", 0.0)) - 180.0) <= 5.0
+        ]
+        if not calibrations:
+            return
+        if not hasattr(self, "trajectoryFlipSources"):
+            self.trajectoryFlipSources = {}
+        added = 0
+        for pulse in self.detect_rf_pulse_descriptors():
+            matching = next(
+                (
+                    calibration for calibration in calibrations
+                    if np.isclose(float(pulse["duration"]), float(calibration["duration"]), rtol=0.03, atol=2e-6)
+                ),
+                None,
+            )
+            if matching is None:
+                continue
+            focus_time = float(pulse["focus"])
+            if all(abs(focus_time - existing) > 1e-15 for existing in self.trajectoryRefocusTimes):
+                self.trajectoryRefocusTimes.append(focus_time)
+                self.trajectoryFlipSources[focus_time] = f"Method: {matching['name']} (180°)"
+                added += 1
+        if added:
+            self.trajectoryRefocusTimes.sort()
+            self.apply_trajectory_zero_in_place()
+
     def is_rf_amplitude_channel(self, channel: list[dict]) -> bool:
         for line in channel:
             if str(line.get("type", "")).upper() != "NCO":
@@ -720,6 +808,282 @@ class InteractionMixin:
                 continue
             for focus_time in focus_times:
                 plot.add_annotation_marker(float(focus_time), "RF focus", color="m")
+
+    def refresh_trajectory_flip_markers(self) -> None:
+        flip_times = sorted(
+            {
+                float(time_value)
+                for time_value in getattr(self, "trajectoryRefocusTimes", [])
+                if np.isfinite(float(time_value))
+            },
+        )
+        acquisition_details = self.get_acquisition_window_details()
+        acquisition_windows = [(float(item["start"]), float(item["end"])) for item in acquisition_details]
+        echo_candidates = self.find_trajectory_echo_candidates()
+        adc_echo_labels: dict[float, str] = {}
+        adc_echo_number = 0
+        for candidate in echo_candidates:
+            echo_time = float(candidate["time"])
+            if any(start <= echo_time <= end for start, end in acquisition_windows):
+                adc_echo_number += 1
+                adc_echo_labels[echo_time] = f"E{adc_echo_number} in ADC"
+        zero_time = getattr(self, "trajectoryZeroReferenceTime", None)
+        for channel, plot in zip(getattr(self, "channels", []), getattr(self, "plots", []), strict=False):
+            plot.clear_annotation_markers(group="trajectory_flip")
+            plot.clear_annotation_markers(group="trajectory_echo")
+            plot.clear_annotation_markers(group="trajectory_zero")
+            plot.clear_overlay_regions(group="acquisition_window")
+            if not channel or channel[0].get("chanLabel") not in {
+                "Gradient Trajectory", "Gradient Trajectory Residual", "Coherence Order",
+            }:
+                continue
+            for item in acquisition_details:
+                start_time, end_time = float(item["start"]), float(item["end"])
+                plot.add_overlay_region(
+                    start_time, end_time,
+                    color=self.get_acquisition_job_color(str(item.get("job_type", "ADC"))),
+                    group="acquisition_window",
+                )
+            for flip_time in flip_times:
+                plot.add_annotation_marker(
+                    flip_time,
+                    "180° flip",
+                    color="#006b6b",
+                    group="trajectory_flip",
+                )
+            if zero_time is not None:
+                plot.add_annotation_marker(
+                    float(zero_time),
+                    "Trajectory zero",
+                    color="#7a3e00",
+                    group="trajectory_zero",
+                )
+            for candidate in echo_candidates:
+                echo_time = float(candidate["time"])
+                in_acquisition = any(start <= echo_time <= end for start, end in acquisition_windows)
+                plot.add_annotation_marker(
+                    echo_time,
+                    adc_echo_labels.get(echo_time, "Echo in ADC") if in_acquisition else "Echo",
+                    color="#006b3c" if in_acquisition else "#8a6500",
+                    group="trajectory_echo",
+                )
+
+        self.refresh_trajectory_flip_table()
+        self.refresh_coherence_results()
+
+    def refresh_coherence_results(self) -> None:
+        legend = self.__dict__.get("acquisitionJobLegendLabel")
+        table = self.__dict__.get("echoResultsListWidget")
+        details = self.get_acquisition_window_details()
+        if legend is not None:
+            job_types = sorted({str(item.get("job_type", "ADC")) for item in details})
+            legend.setText("Acquisition colors: " + ", ".join(job_types) if job_types else "No acquisition jobs detected.")
+        if table is None:
+            return
+        table.clear()
+        adc_echo_number = 0
+        for candidate in self.find_trajectory_echo_candidates():
+            time_value = float(candidate["time"])
+            job = next(
+                (str(item.get("job_type", "ADC")) for item in details if float(item["start"]) <= time_value <= float(item["end"])),
+                "outside ADC",
+            )
+            echo_label = "Echo"
+            if job != "outside ADC":
+                adc_echo_number += 1
+                echo_label = f"E{adc_echo_number}"
+            item = QtWidgets.QListWidgetItem(
+                f"{echo_label} | {self.format_time(time_value)} | {job} | "
+                f"K=({candidate['kx']:.3g}, {candidate['ky']:.3g}, {candidate['kz']:.3g}) | "
+                f"|K|={candidate['residual']:.3g}",
+            )
+            item.setData(Qt.ItemDataRole.UserRole, time_value)
+            table.addItem(item)
+
+    def jump_to_echo_result(self, item: QtWidgets.QListWidgetItem) -> None:
+        self.jump_to_rf_pulse_time(float(item.data(Qt.ItemDataRole.UserRole)))
+
+    def refresh_trajectory_flip_table(self) -> None:
+        table = self.__dict__.get("trajectoryFlipListWidget")
+        if table is None:
+            return
+        table.clear()
+        anchor = getattr(self, "trajectoryZeroReferenceTime", None)
+        for index, flip_time in enumerate(sorted(getattr(self, "trajectoryRefocusTimes", []))):
+            source = getattr(self, "trajectoryFlipSources", {}).get(flip_time, "Manual")
+            before = "-1" if (anchor is None or flip_time >= anchor) ^ (index % 2 == 1) else "+1"
+            after = "+1" if before == "-1" else "-1"
+            item = QtWidgets.QListWidgetItem(
+                f"{self.format_time(float(flip_time))}  |  {source}  |  p: {before} → {after}",
+            )
+            item.setData(Qt.ItemDataRole.UserRole, float(flip_time))
+            table.addItem(item)
+
+    def remove_selected_trajectory_flip(self) -> None:
+        table = self.__dict__.get("trajectoryFlipListWidget")
+        item = table.currentItem() if table is not None else None
+        if item is None:
+            return
+        flip_time = float(item.data(Qt.ItemDataRole.UserRole))
+        self.trajectoryRefocusTimes = [time for time in self.trajectoryRefocusTimes if abs(time - flip_time) > 1e-15]
+        getattr(self, "trajectoryFlipSources", {}).pop(flip_time, None)
+        self.apply_trajectory_zero_in_place()
+        self.update_status()
+
+    def move_selected_trajectory_flip(self) -> None:
+        table = self.__dict__.get("trajectoryFlipListWidget")
+        item = table.currentItem() if table is not None else None
+        if item is None:
+            return
+        old_time = float(item.data(Qt.ItemDataRole.UserRole))
+        new_time, accepted = QtWidgets.QInputDialog.getDouble(
+            self, "Move 180° Flip", "Time (s)", old_time, decimals=12,
+        )
+        if not accepted or abs(new_time - old_time) <= 1e-15:
+            return
+        source = getattr(self, "trajectoryFlipSources", {}).pop(old_time, "Manual")
+        self.trajectoryRefocusTimes = [time for time in self.trajectoryRefocusTimes if abs(time - old_time) > 1e-15]
+        self.trajectoryRefocusTimes.append(float(new_time))
+        self.trajectoryRefocusTimes.sort()
+        self.trajectoryFlipSources[float(new_time)] = source
+        self.apply_trajectory_zero_in_place()
+        self.update_status()
+
+    def detect_acquisition_windows(self) -> list[tuple[float, float]]:
+        sample_windows: set[tuple[float, float]] = set()
+        rgp_windows: set[tuple[float, float]] = set()
+        for channel in getattr(self, "channels", []):
+            for line in channel:
+                key = str(line.get("key", "")).lower()
+                if key not in {"acq", "rgp"}:
+                    continue
+                time_values, gate_values = self.normalize_time_series(
+                    np.asarray(line.get("t", []), dtype=float),
+                    np.asarray(line.get("data", []), dtype=float),
+                )
+                for index in range(max(time_values.size - 1, 0)):
+                    if abs(float(gate_values[index])) > 1e-12 and time_values[index + 1] > time_values[index]:
+                        target = sample_windows if key == "acq" else rgp_windows
+                        target.add((float(time_values[index]), float(time_values[index + 1])))
+        return sorted(sample_windows or rgp_windows)
+
+    def get_acquisition_window_details(self) -> list[dict[str, float | str]]:
+        metadata = self.__dict__.get("acquisitionWindowDetails", [])
+        if metadata:
+            return [dict(item) for item in metadata]
+        return [
+            {"start": start, "end": end, "job_type": "ADC"}
+            for start, end in self.detect_acquisition_windows()
+        ]
+
+    def get_acquisition_job_color(self, job_type: str) -> tuple[int, int, int, int]:
+        palette = ((65, 125, 220, 65), (80, 165, 115, 65), (180, 115, 55, 65), (145, 85, 175, 65))
+        index = sum(ord(character) for character in job_type) % len(palette)
+        return palette[index]
+
+    def detect_trajectory_echoes(self) -> list[float]:
+        return [candidate["time"] for candidate in self.find_trajectory_echo_candidates()]
+
+    def find_trajectory_echo_candidates(self) -> list[dict[str, float]]:
+        trajectory_channel = next(
+            (
+                channel
+                for channel in getattr(self, "channels", [])
+                if channel and channel[0].get("chanLabel") == "Gradient Trajectory"
+            ),
+            None,
+        )
+        if not trajectory_channel or not getattr(self, "trajectoryRefocusTimes", []):
+            return []
+
+        knot_parts = [np.asarray(line.get("t", []), dtype=float) for line in trajectory_channel]
+        knot_parts.append(np.asarray(getattr(self, "trajectoryRefocusTimes", []), dtype=float))
+        anchor_time = getattr(self, "trajectoryZeroReferenceTime", None)
+        if anchor_time is not None:
+            knot_parts.append(np.asarray([anchor_time], dtype=float))
+        common_time = np.unique(np.concatenate([part for part in knot_parts if part.size])) if any(
+            part.size for part in knot_parts
+        ) else np.asarray([], dtype=float)
+        if common_time.size < 2:
+            return []
+        components: list[np.ndarray] = []
+        for line in trajectory_channel:
+            line_time = np.asarray(line.get("t", []), dtype=float)
+            line_data = np.asarray(line.get("data", line.get("raw_data", [])), dtype=float)
+            if line_time.size and line_data.size:
+                components.append(np.interp(common_time, line_time, line_data))
+        if not components:
+            return []
+
+        trajectory = np.vstack(components).T
+        residual = np.linalg.norm(trajectory, axis=1)
+        peak = float(np.max(residual))
+        tolerance = max(peak * float(self.__dict__.get("trajectoryEchoRelativeTolerance", 1e-2)), 1e-12)
+        if anchor_time is None:
+            anchor_time = float(common_time[0])
+        first_flip = min(float(value) for value in self.trajectoryRefocusTimes)
+        candidate_indices: list[tuple[float, np.ndarray]] = []
+        for index, interval_duration in enumerate(np.diff(common_time)):
+            if interval_duration <= 0:
+                continue
+            start = trajectory[index]
+            delta = trajectory[index + 1] - start
+            denominator = float(np.dot(delta, delta))
+            fraction = 0.0 if denominator <= 1e-30 else float(np.clip(-np.dot(start, delta) / denominator, 0.0, 1.0))
+            moment = start + fraction * delta
+            time_value = float(common_time[index] + fraction * interval_duration)
+            magnitude = float(np.linalg.norm(moment))
+            # An interpolated minimum belongs to this interval only when it is
+            # genuinely interior.  Endpoint minima are considered once below as
+            # knot-local minima; otherwise every below-threshold sample becomes
+            # a duplicate "echo".
+            if fraction <= 1e-12 or fraction >= 1.0 - 1e-12:
+                continue
+            if time_value <= max(float(anchor_time), first_flip) or magnitude > tolerance:
+                continue
+            candidate_indices.append((time_value, moment))
+
+        # Include minima which occur exactly at a trajectory knot.  The strict
+        # comparison on either side suppresses flat, sub-threshold plateaus.
+        minimum_time = max(float(anchor_time), first_flip)
+        for index in range(1, common_time.size - 1):
+            if common_time[index] <= minimum_time or residual[index] > tolerance:
+                continue
+            if residual[index] <= residual[index - 1] and residual[index] <= residual[index + 1] and (
+                residual[index] < residual[index - 1] or residual[index] < residual[index + 1]
+            ):
+                candidate_indices.append((float(common_time[index]), trajectory[index]))
+
+        candidates: list[dict[str, float]] = []
+        for time_value, moment in sorted(candidate_indices, key=lambda item: item[0]):
+            if candidates and abs(time_value - candidates[-1]["time"]) <= 1e-12:
+                continue
+            candidates.append({
+                "time": time_value,
+                "kx": float(moment[0]) if moment.size > 0 else 0.0,
+                "ky": float(moment[1]) if moment.size > 1 else 0.0,
+                "kz": float(moment[2]) if moment.size > 2 else 0.0,
+                "residual": float(np.linalg.norm(moment)),
+            })
+        return candidates
+
+    def get_trajectory_moment_summary(self, time_value: float | None) -> str:
+        if time_value is None:
+            return "K: -"
+        trajectory = next(
+            (channel for channel in getattr(self, "channels", []) if channel and channel[0].get("chanLabel") == "Gradient Trajectory"),
+            [],
+        )
+        values: list[float] = []
+        labels: list[str] = []
+        for line in trajectory:
+            time = np.asarray(line.get("t", []), dtype=float)
+            data = np.asarray(line.get("data", []), dtype=float)
+            if time.size and data.size:
+                value = float(np.interp(time_value, time, data))
+                values.append(value)
+                labels.append(f"{line.get('key', '?')}={value:.4g}")
+        return f"K: {', '.join(labels)}, |K|={np.linalg.norm(values):.4g}" if values else "K: -"
 
     def jump_to_rf_pulse_time(self, target_time: float) -> None:
         if not self.plots:
@@ -824,6 +1188,7 @@ class InteractionMixin:
         self.gradientDisplayUnits = str(self.gradientDisplayUnitsComboBox.currentData() or "hz_per_mm")
         self.splitGradientChannels = bool(self.splitGradientChannelsCheckBox.isChecked())
         self.derivedSignalStartupPadding = float(self.derivedSignalStartupPaddingSpinBox.value())
+        self.trajectoryEchoRelativeTolerance = float(self.trajectoryEchoToleranceSpinBox.value()) / 100.0
         self.settings.setValue("themeMode", self.themeMode)
         self.settings.setValue("gradientCalibrationHzPerMm", self.gradientCalibrationHzPerMm)
         self.settings.setValue("nucleusGammaMHzPerT", self.nucleusGammaMHzPerT)
@@ -831,9 +1196,12 @@ class InteractionMixin:
         self.settings.setValue("gradientDisplayUnits", self.gradientDisplayUnits)
         self.settings.setValue("splitGradientChannels", self.splitGradientChannels)
         self.settings.setValue("derivedSignalStartupPadding", self.derivedSignalStartupPadding)
+        self.settings.setValue("trajectoryEchoRelativeTolerance", self.trajectoryEchoRelativeTolerance)
         self.apply_theme_settings()
         self.update_existing_plot_themes()
         self.update_scanner_settings_display()
+        if self.channels:
+            self.refresh_trajectory_flip_markers()
         if self.channels:
             self.selectedChannels = [
                 str(getattr(check_box, "channel_key", check_box.text()))
@@ -1108,6 +1476,7 @@ class InteractionMixin:
         snap_text = "On" if self.measureSnapToEvents else "Off"
         refocus_count = len(getattr(self, "trajectoryRefocusTimes", []))
         pulse_program_text = self.get_pulse_program_location(self.currentCursorTime)
+        moment_text = self.get_trajectory_moment_summary(self.currentCursorTime)
         self.statusBar().showMessage(
             " | ".join(
                 (
@@ -1117,6 +1486,7 @@ class InteractionMixin:
                     f"Cursor: {cursor_text}",
                     f"Measurement: {measurement_text}",
                     f"180 flips: {refocus_count}",
+                    moment_text,
                     f"PPG: {pulse_program_text}",
                 ),
             ),

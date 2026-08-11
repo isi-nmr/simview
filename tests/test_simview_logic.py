@@ -12,6 +12,7 @@ from utils.simUtilsBrkr import (
     build_pulse_program_event_annotations,
     bruker_pw_attenuation_db_to_watts,
     extract_acquisition_windows,
+    extract_sample_acquisition_window_details,
     extract_sample_acquisition_windows,
     getRFEvents,
     readGrads,
@@ -66,9 +67,34 @@ class DummyPlot:
 class DummyCursorPlot:
     def __init__(self) -> None:
         self.markers: list[tuple[float, str, str]] = []
+        self.marker_groups: list[str | None] = []
+        self.regions: list[tuple[float, float, str | None]] = []
 
-    def add_annotation_marker(self, time_value: float, text_value: str, *, color: str = "r") -> None:
+    def add_annotation_marker(
+        self,
+        time_value: float,
+        text_value: str,
+        *,
+        color: str = "r",
+        group: str | None = None,
+    ) -> None:
         self.markers.append((time_value, text_value, color))
+        self.marker_groups.append(group)
+
+    def clear_annotation_markers(self, *, group: str | None = None) -> None:
+        retained = [
+            (marker, marker_group)
+            for marker, marker_group in zip(self.markers, self.marker_groups, strict=True)
+            if group is not None and marker_group != group
+        ]
+        self.markers = [marker for marker, _group in retained]
+        self.marker_groups = [marker_group for _marker, marker_group in retained]
+
+    def add_overlay_region(self, start_time: float, end_time: float, *, color=(50, 140, 255, 45), group=None) -> None:
+        self.regions.append((start_time, end_time, group))
+
+    def clear_overlay_regions(self, *, group: str | None = None) -> None:
+        self.regions = [region for region in self.regions if group is not None and region[2] != group]
 
 
 @pytest.fixture
@@ -197,14 +223,14 @@ def test_zero_trajectory_to_reference_interpolates_at_cursor_time(app_logic: GUI
     np.testing.assert_allclose(zeroed, np.array([-1.0, 1.0, 3.0]))
 
 
-def test_refocus_trajectory_flips_value_then_continues_accumulating(app_logic: GUIapp) -> None:
+def test_refocus_trajectory_flips_subsequent_gradient_contributions(app_logic: GUIapp) -> None:
     app_logic.trajectoryRefocusTimes = [1.0]
     time = np.array([0.0, 1.0, 2.0, 3.0])
     trajectory = np.array([0.0, 2.0, 4.0, 6.0])
 
     refocused = app_logic.apply_trajectory_refocuses(time, trajectory)
 
-    np.testing.assert_allclose(refocused, np.array([0.0, -2.0, 0.0, 2.0]))
+    np.testing.assert_allclose(refocused, np.array([0.0, 2.0, 0.0, -2.0]))
 
 
 def test_trajectory_display_transforms_apply_zero_before_refocus(app_logic: GUIapp) -> None:
@@ -215,7 +241,65 @@ def test_trajectory_display_transforms_apply_zero_before_refocus(app_logic: GUIa
 
     transformed = app_logic.apply_trajectory_display_transforms(time, trajectory)
 
-    np.testing.assert_allclose(transformed, np.array([-1.0, -1.0, 1.0]))
+    np.testing.assert_allclose(transformed, np.array([-1.0, 1.0, -1.0]))
+
+
+def test_refocus_trajectory_uses_selected_zero_as_coherence_path_origin(app_logic: GUIapp) -> None:
+    app_logic.trajectoryZeroReferenceTime = 1.0
+    app_logic.trajectoryRefocusTimes = [0.5, 2.0]
+    time = np.array([0.0, 1.0, 2.0, 3.0])
+    trajectory = np.array([0.0, 2.0, 4.0, 6.0])
+
+    transformed = app_logic.apply_trajectory_display_transforms(time, trajectory)
+
+    np.testing.assert_allclose(transformed, np.array([0.0, 0.0, 2.0, 0.0]))
+
+
+def test_refocus_trajectory_handles_multiple_off_sample_flips(app_logic: GUIapp) -> None:
+    app_logic.trajectoryZeroReferenceTime = 0.0
+    app_logic.trajectoryRefocusTimes = [0.5, 1.5, 2.5]
+    time = np.array([0.0, 1.0, 2.0, 3.0])
+    trajectory = np.array([0.0, 1.0, 2.0, 3.0])
+
+    transformed = app_logic.apply_trajectory_display_transforms(time, trajectory)
+
+    np.testing.assert_allclose(transformed, np.array([0.0, 0.0, 0.0, 0.0]))
+
+
+def test_coherence_order_toggles_at_flips_relative_to_selected_zero(app_logic: GUIapp) -> None:
+    app_logic.trajectoryZeroReferenceTime = 1.0
+    app_logic.trajectoryRefocusTimes = [0.5, 2.0]
+
+    profile_time, coherence_order = app_logic.compute_coherence_order_profile(np.array([0.0, 3.0]))
+
+    np.testing.assert_allclose(profile_time, np.array([0.0, 0.5, 2.0, 3.0]))
+    np.testing.assert_allclose(coherence_order, np.array([1.0, -1.0, 1.0, 1.0]))
+
+
+def test_coherence_channel_keeps_only_gradient_time_extent(app_logic: GUIapp) -> None:
+    gradient_time = np.linspace(0.0, 10.0, 100_000)
+    app_logic.channels = [
+        [
+            {
+                "chanLabel": "Gradients",
+                "label": "Gx",
+                "type": "grads",
+                "ind": "0",
+                "key": "Gx",
+                "plotType": "mag",
+                "units": "%",
+                "t": gradient_time,
+                "data": np.zeros_like(gradient_time),
+                "annotations": [],
+            },
+        ],
+    ]
+
+    derived_channels = app_logic.build_gradient_derived_channels()
+    coherence_line = next(channel[0] for channel in derived_channels if channel[0]["chanLabel"] == "Coherence Order")
+
+    np.testing.assert_allclose(coherence_line["source_time"], np.array([0.0, 10.0]))
+    assert coherence_line["pen"] in multiplot.makePens()[1]
 
 
 def test_build_nco_power_derived_channels_merges_event_times(app_logic: GUIapp) -> None:
@@ -335,6 +419,37 @@ def test_extract_sample_acquisition_windows_uses_internal_dwell_end() -> None:
     windows = extract_sample_acquisition_windows(event_infos)
 
     assert windows == {"3": [(10.0, 11.0)]}
+
+
+def test_extract_sample_acquisition_windows_accepts_bruker_11000001_end_line() -> None:
+    event_infos = [{"events": [
+        {"t": 10.0, "nco": "3", "rgp": "0--0x1"},
+        {"t": 11.0, "ln": "11000001"},
+    ]}]
+
+    assert extract_sample_acquisition_windows(event_infos) == {"3": [(10.0, 11.0)]}
+
+
+def test_sample_acquisition_window_details_retains_job_type() -> None:
+    event_infos = [{"events": [
+        {"t": 10.0, "nco": "3", "rgp": "0--0x1", "ln": "13000000"},
+        {"t": 11.0, "nco": "3", "ln": "13000001"},
+    ]}]
+
+    assert extract_sample_acquisition_window_details(event_infos) == [
+        {"nco": "3", "start": 10.0, "end": 11.0, "job_type": "job 13"},
+    ]
+
+
+def test_annotate_fcube_event_jobs_carries_job_to_newer_sample_end_line() -> None:
+    info = {"events": [
+        {"t": 10.0, "ln": "13000000", "rgp": "0--0x1"},
+        {"t": 11.0, "ln": "13000001"},
+    ]}
+
+    annotate_fcube_event_jobs(info, {"13000000": "7"})
+
+    assert info["events"][1]["job"] == "7"
 
 
 def test_acquisition_windows_match_starts_and_ends_by_job_number() -> None:
@@ -835,6 +950,134 @@ def test_rf_focus_markers_are_added_only_to_amplitude_channels(app_logic: GUIapp
     assert app_logic.plots[0].markers == [(1.5, "RF focus", "m")]
     assert app_logic.plots[1].markers == []
     assert app_logic.plots[2].markers == []
+
+
+def test_detect_rf_pulse_descriptors_records_repeatable_pulse_signatures(app_logic: GUIapp) -> None:
+    app_logic.channels = [[{
+        "type": "NCO", "key": "am", "ind": "1",
+        "t": np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        "data": np.array([0.0, 1.0, 0.0, 1.0, 0.0]),
+    }]]
+
+    pulses = app_logic.detect_rf_pulse_descriptors()
+
+    assert len(pulses) == 2
+    assert pulses[0]["duration"] == pulses[1]["duration"] == 1.0
+    assert pulses[0]["area"] == pulses[1]["area"] == 0.5
+
+
+def test_trajectory_flip_markers_are_refreshed_only_on_trajectory_plots(app_logic: GUIapp) -> None:
+    app_logic.trajectoryRefocusTimes = [2.0, 1.0]
+    app_logic.channels = [
+        [{"chanLabel": "Gradients"}],
+        [{"chanLabel": "Gradient Trajectory"}],
+    ]
+    app_logic.plots = [DummyCursorPlot(), DummyCursorPlot()]
+    app_logic.plots[1].add_annotation_marker(0.5, "old flip", group="trajectory_flip")
+
+    app_logic.refresh_trajectory_flip_markers()
+
+    assert app_logic.plots[0].markers == []
+    assert app_logic.plots[1].markers == [
+        (1.0, "180° flip", "#006b6b"),
+        (2.0, "180° flip", "#006b6b"),
+    ]
+
+
+def test_trajectory_echo_and_acquisition_window_are_marked(app_logic: GUIapp) -> None:
+    app_logic.trajectoryZeroReferenceTime = 0.0
+    app_logic.trajectoryRefocusTimes = [0.5]
+    app_logic.channels = [
+        [
+            {
+                "chanLabel": "Gradient Trajectory",
+                "t": np.array([0.0, 1.0, 2.0, 3.0]),
+                "data": np.array([0.0, 1.0, 0.0, 1.0]),
+            },
+        ],
+        [
+            {
+                "chanLabel": "NCO_1_rgp",
+                "key": "rgp",
+                "t": np.array([1.5, 2.5]),
+                "data": np.array([1.0, 0.0]),
+            },
+        ],
+    ]
+    app_logic.plots = [DummyCursorPlot(), DummyCursorPlot()]
+
+    app_logic.refresh_trajectory_flip_markers()
+
+    assert app_logic.detect_acquisition_windows() == [(1.5, 2.5)]
+    assert app_logic.detect_trajectory_echoes() == [2.0]
+    assert app_logic.plots[0].regions == [(1.5, 2.5, "acquisition_window")]
+    assert (2.0, "E1 in ADC", "#006b3c") in app_logic.plots[0].markers
+
+
+def test_trajectory_zero_marker_is_added_to_derived_coherence_plots(app_logic: GUIapp) -> None:
+    app_logic.trajectoryZeroReferenceTime = 1.25
+    app_logic.channels = [
+        [{"chanLabel": "Gradient Trajectory"}],
+        [{"chanLabel": "Gradient Trajectory Residual"}],
+        [{"chanLabel": "Coherence Order"}],
+    ]
+    app_logic.plots = [DummyCursorPlot(), DummyCursorPlot(), DummyCursorPlot()]
+
+    app_logic.refresh_trajectory_flip_markers()
+
+    for plot in app_logic.plots:
+        assert (1.25, "Trajectory zero", "#7a3e00") in plot.markers
+
+
+def test_trajectory_echo_detection_interpolates_between_gradient_samples(app_logic: GUIapp) -> None:
+    app_logic.trajectoryZeroReferenceTime = 0.0
+    app_logic.trajectoryRefocusTimes = [0.25]
+    app_logic.channels = [[{
+        "chanLabel": "Gradient Trajectory",
+        "t": np.array([0.0, 1.0, 2.0]),
+        "raw_data": np.array([0.0, 1.0, 0.0]),
+        "data": np.array([0.0, -0.5, 0.5]),
+    }]]
+
+    candidates = app_logic.find_trajectory_echo_candidates()
+
+    assert [candidate["time"] for candidate in candidates] == pytest.approx([1.5])
+    assert candidates[-1]["residual"] == pytest.approx(0.0)
+
+
+def test_trajectory_echo_detection_reports_a_local_minimum_not_every_low_sample(app_logic: GUIapp) -> None:
+    app_logic.trajectoryZeroReferenceTime = 0.0
+    app_logic.trajectoryRefocusTimes = [0.25]
+    app_logic.trajectoryEchoRelativeTolerance = 0.05
+    app_logic.channels = [[{
+        "chanLabel": "Gradient Trajectory",
+        "t": np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        "data": np.array([1.0, 0.03, 0.02, 0.03, 1.0]),
+    }]]
+
+    candidates = app_logic.find_trajectory_echo_candidates()
+
+    assert [candidate["time"] for candidate in candidates] == pytest.approx([2.0])
+
+
+def test_trajectory_residual_combines_all_gradient_axes(app_logic: GUIapp) -> None:
+    time, residual = app_logic.compute_trajectory_residual([
+        {"t": np.array([0.0, 1.0]), "data": np.array([3.0, 0.0])},
+        {"t": np.array([0.0, 1.0]), "data": np.array([4.0, 0.0])},
+    ])
+
+    np.testing.assert_allclose(time, np.array([0.0, 1.0]))
+    np.testing.assert_allclose(residual, np.array([5.0, 0.0]))
+
+
+def test_trajectory_residual_includes_the_interpolated_trajectory_zero(app_logic: GUIapp) -> None:
+    app_logic.trajectoryZeroReferenceTime = 0.5
+    time, residual = app_logic.compute_trajectory_residual([
+        {"t": np.array([0.0, 1.0, 2.0]), "data": np.array([-1.0, 1.0, 3.0])},
+    ])
+
+    np.testing.assert_allclose(time, np.array([0.0, 0.5, 1.0, 2.0]))
+    np.testing.assert_allclose(residual, np.array([1.0, 0.0, 1.0, 3.0]))
 
 
 def test_jump_to_next_and_previous_rf_pulse_target_selection(app_logic: GUIapp) -> None:
