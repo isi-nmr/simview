@@ -1058,10 +1058,12 @@ class InteractionMixin:
             if np.isfinite(float(value)) and start_time <= float(value) <= end_time
         })
         candidates: list[dict[str, float]] = []
+        paired_excitation_indices: set[int] = set()
         for refocus_time in refocuses:
             excitation_index = int(np.searchsorted(excitations, refocus_time, side="left") - 1)
-            if excitation_index < 0:
+            if excitation_index < 0 or excitation_index in paired_excitation_indices:
                 continue
+            paired_excitation_indices.add(excitation_index)
             excitation_time = float(excitations[excitation_index])
             echo_time = 2.0 * refocus_time - excitation_time
             next_excitation = (
