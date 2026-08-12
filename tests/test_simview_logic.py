@@ -213,6 +213,34 @@ def test_gradient_trajectory_integrates_sparse_nonequidistant_trapezoids(app_log
     np.testing.assert_allclose(trajectory, expected, rtol=1e-12, atol=1e-12)
 
 
+def test_effective_gradient_changes_sign_at_each_refocus(app_logic: GUIapp) -> None:
+    app_logic.trajectoryRefocusTimes = [1.0, 2.0]
+
+    time, effective = app_logic.compute_effective_gradient_profile(
+        np.array([0.0, 1.0, 2.0, 3.0]),
+        np.array([1.0, 2.0, 3.0, 4.0]),
+    )
+
+    np.testing.assert_allclose(time, np.array([0.0, 1.0, 1.0, 2.0, 2.0, 3.0]))
+    np.testing.assert_allclose(effective, np.array([1.0, 2.0, -2.0, -3.0, 3.0, 4.0]))
+
+
+def test_b_matrix_at_cursor_integrates_effective_trajectory(app_logic: GUIapp) -> None:
+    app_logic.channels = [[{
+        "chanLabel": "Effective Trajectory",
+        "units": "cycles/mm",
+        "t": np.array([0.0, 1.0]),
+        "data": np.array([0.0, 1.0]),
+    }]]
+
+    matrix = app_logic.compute_b_matrix_at_time(1.0)
+
+    assert matrix is not None
+    assert matrix[0, 0] == pytest.approx((2.0 * np.pi) ** 2 / 3.0)
+    np.testing.assert_allclose(matrix[1:, :], 0.0)
+    np.testing.assert_allclose(matrix[:, 1:], 0.0)
+
+
 def test_zero_trajectory_to_reference_interpolates_at_cursor_time(app_logic: GUIapp) -> None:
     app_logic.trajectoryZeroReferenceTime = 0.5
     time = np.array([0.0, 1.0, 2.0])

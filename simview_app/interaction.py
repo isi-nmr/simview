@@ -862,7 +862,7 @@ class InteractionMixin:
             plot.clear_annotation_markers(group="trajectory_excitation_reset")
             plot.clear_overlay_regions(group="acquisition_window")
             if not channel or channel[0].get("chanLabel") not in {
-                "Gradient Trajectory", "Gradient Trajectory Residual", "Coherence Order",
+                "Gradient Trajectory", "Effective Gradient", "Effective Trajectory", "Gradient Trajectory Residual", "Coherence Order",
             }:
                 continue
             for item in acquisition_details:
@@ -1022,10 +1022,16 @@ class InteractionMixin:
             (
                 channel
                 for channel in getattr(self, "channels", [])
-                if channel and channel[0].get("chanLabel") == "Gradient Trajectory"
+                if channel and channel[0].get("chanLabel") == "Effective Trajectory"
             ),
             None,
         )
+        if trajectory_channel is None:
+            trajectory_channel = next(
+                (channel for channel in getattr(self, "channels", [])
+                 if channel and channel[0].get("chanLabel") == "Gradient Trajectory"),
+                None,
+            )
         if not trajectory_channel or not getattr(self, "trajectoryRefocusTimes", []):
             return []
 
@@ -1104,9 +1110,15 @@ class InteractionMixin:
         if time_value is None:
             return "K: -"
         trajectory = next(
-            (channel for channel in getattr(self, "channels", []) if channel and channel[0].get("chanLabel") == "Gradient Trajectory"),
+            (channel for channel in getattr(self, "channels", []) if channel and channel[0].get("chanLabel") == "Effective Trajectory"),
             [],
         )
+        if not trajectory:
+            trajectory = next(
+                (channel for channel in getattr(self, "channels", [])
+                 if channel and channel[0].get("chanLabel") == "Gradient Trajectory"),
+                [],
+            )
         values: list[float] = []
         labels: list[str] = []
         for line in trajectory:
@@ -1117,6 +1129,39 @@ class InteractionMixin:
                 values.append(value)
                 labels.append(f"{line.get('key', '?')}={value:.4g}")
         return f"K: {', '.join(labels)}, |K|={np.linalg.norm(values):.4g}" if values else "K: -"
+
+    def get_b_matrix_summary(self, time_value: float | None) -> str:
+        matrix = self.compute_b_matrix_at_time(time_value)
+        if matrix is None:
+            return "b: - (gradient calibration required)"
+        rows = [",".join(f"{value:.3g}" for value in row) for row in matrix]
+        return "b [s/mm²]: [" + "; ".join(rows) + "]"
+
+    def refresh_b_matrix_display(self, time_value: float | None) -> None:
+        labels = self.__dict__.get("bMatrixValueLabels")
+        if not labels:
+            return
+        matrix = self.compute_b_matrix_at_time(time_value)
+        cursor_label = self.__dict__.get("bMatrixCursorLabel")
+        units_label = self.__dict__.get("bMatrixUnitsLabel")
+        if matrix is None:
+            for row in labels:
+                for label in row:
+                    label.setText("—")
+            if cursor_label is not None:
+                cursor_label.setText(
+                    "Move the cursor over a plot" if time_value is None else "Gradient calibration required"
+                )
+            if units_label is not None:
+                units_label.setText("s/mm²")
+            return
+        for row_index, row in enumerate(labels):
+            for column_index, label in enumerate(row):
+                label.setText(f"{matrix[row_index, column_index]:.4g}")
+        if cursor_label is not None:
+            cursor_label.setText(f"t = {self.format_time(time_value)}")
+        if units_label is not None:
+            units_label.setText("s/mm²")
 
     def jump_to_rf_pulse_time(self, target_time: float) -> None:
         if not self.plots:
@@ -1518,6 +1563,7 @@ class InteractionMixin:
         refocus_count = len(getattr(self, "trajectoryRefocusTimes", []))
         pulse_program_text = self.get_pulse_program_location(self.currentCursorTime)
         moment_text = self.get_trajectory_moment_summary(self.currentCursorTime)
+        self.refresh_b_matrix_display(self.currentCursorTime)
         self.statusBar().showMessage(
             " | ".join(
                 (

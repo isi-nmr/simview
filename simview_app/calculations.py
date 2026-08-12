@@ -143,6 +143,33 @@ class CalculationMixin:
         trajectory[1:] = np.cumsum(interval_area)
         return trajectory
 
+    def compute_effective_gradient_profile(
+        self,
+        time: np.ndarray,
+        data: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return G(t) with its sign reversed at every selected 180-degree pulse."""
+        source_time, source_data = self.normalize_time_series(time, data)
+        if source_time.size == 0:
+            return source_time, source_data
+        flips = np.asarray(sorted({
+            float(value) for value in getattr(self, "trajectoryRefocusTimes", [])
+            if np.isfinite(float(value)) and source_time[0] <= float(value) <= source_time[-1]
+        }), dtype=float)
+        knots = np.unique(np.concatenate((source_time, flips)))
+        profile_time: list[float] = []
+        effective_values: list[float] = []
+        for knot in knots:
+            value = float(np.interp(knot, source_time, source_data))
+            flips_before = int(np.searchsorted(flips, knot, side="left"))
+            is_flip = flips_before < flips.size and np.isclose(flips[flips_before], knot, atol=1e-15, rtol=0.0)
+            profile_time.append(float(knot))
+            effective_values.append(value * (-1.0 if flips_before % 2 else 1.0))
+            if is_flip:
+                profile_time.append(float(knot))
+                effective_values.append(value * (-1.0 if (flips_before + 1) % 2 else 1.0))
+        return np.asarray(profile_time), np.asarray(effective_values)
+
     def compute_gradient_duty_cycle(self, time: np.ndarray, data: np.ndarray) -> np.ndarray:
         norm_time, norm_data = self.normalize_time_series(time, data)
         duty_cycle = np.zeros_like(norm_data, dtype=float)
@@ -572,7 +599,18 @@ class CalculationMixin:
             return
 
         for channel, plot in zip(self.channels, self.plots, strict=False):
-            if not channel or channel[0].get("chanLabel") != "Gradient Trajectory":
+            if not channel or channel[0].get("chanLabel") != "Effective Gradient":
+                continue
+            for line_index, line in enumerate(channel):
+                source_time = np.asarray(line.get("raw_t", line.get("t", [])), dtype=float)
+                source_data = np.asarray(line.get("raw_data", line.get("data", [])), dtype=float)
+                time, effective = self.compute_effective_gradient_profile(source_time, source_data)
+                line["t"], line["data"] = time, effective
+                if line_index < len(plot.managed_curves):
+                    plot.update_managed_curve(line_index, time, effective)
+
+        for channel, plot in zip(self.channels, self.plots, strict=False):
+            if not channel or channel[0].get("chanLabel") != "Effective Trajectory":
                 continue
 
             for line_index, line in enumerate(channel):
@@ -684,7 +722,7 @@ class CalculationMixin:
 
     def update_trajectory_residual_in_place(self) -> None:
         trajectory = next(
-            (channel for channel in self.channels if channel and channel[0].get("chanLabel") == "Gradient Trajectory"),
+            (channel for channel in self.channels if channel and channel[0].get("chanLabel") == "Effective Trajectory"),
             [],
         )
         time, residual = self.compute_trajectory_residual(trajectory)
@@ -719,6 +757,8 @@ class CalculationMixin:
 
         slew_channel: list[dict] = []
         trajectory_channel: list[dict] = []
+        effective_gradient_channel: list[dict] = []
+        effective_trajectory_channel: list[dict] = []
         duty_cycle_channel: list[dict] = []
         coherence_source_time: np.ndarray | None = None
 
@@ -758,10 +798,12 @@ class CalculationMixin:
                 slew_time, slew_data = self.compute_gradient_slew_rate_profile(time, data)
                 slew_units = f"{display_units}/s" if display_units else "a.u./s"
                 traj_time = time
+                traj_source = data
                 raw_traj_data = self.compute_gradient_trajectory(time, data)
                 traj_units = f"{display_units}*s" if display_units else "a.u.*s"
 
-            display_traj_time, traj_data = self.get_trajectory_display_profile(traj_time, raw_traj_data)
+            effective_traj_time, effective_traj_data = self.get_trajectory_display_profile(traj_time, raw_traj_data)
+            effective_gradient_time, effective_gradient_data = self.compute_effective_gradient_profile(traj_time, traj_source)
             duty_cycle_time, duty_cycle_source = self.normalize_time_series(time, display_data)
             duty_cycle_data = self.compute_gradient_duty_cycle(duty_cycle_time, duty_cycle_source)
 
@@ -792,13 +834,32 @@ class CalculationMixin:
                     "plotType": "mag",
                     "units": traj_units,
                     "raw_t": traj_time.copy(),
-                    "t": display_traj_time,
+                    "t": traj_time,
                     "raw_data": raw_traj_data.copy(),
-                    "data": traj_data,
+                    "data": raw_traj_data.copy(),
                     "annotations": [],
                     "pen": pen,
                     "drawStyle": "line",
                     "show": False,
+                },
+            )
+            effective_gradient_channel.append(
+                {
+                    "chanLabel": "Effective Gradient", "label": f"G{axis},eff", "type": "grads_derived",
+                    "ind": source_line.get("ind", axis), "key": f"G{axis}eff", "plotType": "mag",
+                    "units": "Hz/mm" if physical_hz_per_mm is not None else display_units,
+                    "raw_t": traj_time.copy(), "t": effective_gradient_time,
+                    "raw_data": np.asarray(traj_source, dtype=float).copy(), "data": effective_gradient_data,
+                    "annotations": [], "pen": pen, "drawStyle": "line", "show": False,
+                },
+            )
+            effective_trajectory_channel.append(
+                {
+                    "chanLabel": "Effective Trajectory", "label": f"F{axis}", "type": "grads_derived",
+                    "ind": source_line.get("ind", axis), "key": f"F{axis}", "plotType": "mag",
+                    "units": traj_units, "raw_t": traj_time.copy(), "t": effective_traj_time,
+                    "raw_data": raw_traj_data.copy(), "data": effective_traj_data,
+                    "annotations": [], "pen": pen, "drawStyle": "line", "show": False,
                 },
             )
             duty_cycle_channel.append(
@@ -823,7 +884,11 @@ class CalculationMixin:
             derived_channels.append(slew_channel)
         if trajectory_channel:
             derived_channels.append(trajectory_channel)
-            residual_time, residual_data = self.compute_trajectory_residual(trajectory_channel)
+        if effective_gradient_channel:
+            derived_channels.append(effective_gradient_channel)
+        if effective_trajectory_channel:
+            derived_channels.append(effective_trajectory_channel)
+            residual_time, residual_data = self.compute_trajectory_residual(effective_trajectory_channel)
             derived_channels.append([{
                 "chanLabel": "Gradient Trajectory Residual", "label": "|K|", "type": "grads_derived",
                 "ind": "residual", "key": "Kmag", "plotType": "mag", "units": trajectory_channel[0]["units"],
@@ -890,6 +955,55 @@ class CalculationMixin:
             derived_channels.append(duty_cycle_channel)
 
         return derived_channels
+
+    def compute_b_matrix_at_time(self, time_value: float | None) -> np.ndarray | None:
+        """Numerically integrate the PDF's b-matrix definition through time_value."""
+        if time_value is None:
+            return None
+        trajectory = next(
+            (channel for channel in getattr(self, "channels", [])
+             if channel and channel[0].get("chanLabel") == "Effective Trajectory"),
+            [],
+        )
+        if not trajectory or any(str(line.get("units", "")) != "cycles/mm" for line in trajectory):
+            return None
+        parts = [np.asarray(line.get("t", []), dtype=float) for line in trajectory]
+        if not parts or not any(part.size for part in parts):
+            return None
+        end_time = float(time_value)
+        start_time = max(float(part[0]) for part in parts if part.size)
+        last_time = min(float(part[-1]) for part in parts if part.size)
+        end_time = min(max(end_time, start_time), last_time)
+        anchor_time = getattr(self, "trajectoryZeroReferenceTime", None)
+        if anchor_time is not None and start_time <= float(anchor_time) <= end_time:
+            start_time = float(anchor_time)
+        excitation_times = self.get_trajectory_excitation_times(np.asarray([start_time, last_time], dtype=float))
+        preceding_excitations = excitation_times[excitation_times <= end_time]
+        if preceding_excitations.size:
+            start_time = max(start_time, float(preceding_excitations[-1]))
+        knots = np.unique(np.concatenate([part[(part >= start_time) & (part <= end_time)] for part in parts] + [np.asarray([start_time, end_time])]))
+        if knots.size < 2:
+            return np.zeros((3, 3), dtype=float)
+        components = [np.zeros_like(knots) for _ in range(3)]
+        for fallback_index, line in enumerate(trajectory[:3]):
+            line_time = np.asarray(line.get("t", []), dtype=float)
+            line_data = np.asarray(line.get("data", []), dtype=float)
+            key = re.sub(r"[^a-z]", "", str(line.get("key", line.get("label", ""))).lower())
+            axis_index = next((index for index, axis in enumerate("xyz") if axis in key), fallback_index)
+            components[axis_index] = np.interp(knots, line_time, line_data)
+        effective_trajectory = np.vstack(components)
+        starts = effective_trajectory[:, :-1]
+        ends = effective_trajectory[:, 1:]
+        dt = np.diff(knots)
+        # F is linear between gradient knots, so integrate each quadratic
+        # outer product exactly instead of trapezoid-approximating F_i F_j.
+        integrals = (
+            2.0 * starts[:, None, :] * starts[None, :, :]
+            + starts[:, None, :] * ends[None, :, :]
+            + ends[:, None, :] * starts[None, :, :]
+            + 2.0 * ends[:, None, :] * ends[None, :, :]
+        ) * (dt / 6.0)
+        return (2.0 * np.pi) ** 2 * np.sum(integrals, axis=2)
 
     def slice_curve_to_range(
         self,

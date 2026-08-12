@@ -307,9 +307,39 @@ class GUIapp(
         self.channelScrollArea.setWidgetResizable(True)
         self.channelScrollArea.setWidget(self.channelListWidget)
 
+        self.bMatrixGroup = QtWidgets.QGroupBox("b-Matrix at Cursor")
+        self.bMatrixLayout = QtWidgets.QGridLayout(self.bMatrixGroup)
+        self.bMatrixLayout.setContentsMargins(10, 14, 10, 10)
+        self.bMatrixLayout.setHorizontalSpacing(5)
+        self.bMatrixLayout.setVerticalSpacing(3)
+        self.bMatrixCursorLabel = QtWidgets.QLabel("Move the cursor over a plot")
+        self.bMatrixCursorLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.bMatrixLayout.addWidget(self.bMatrixCursorLabel, 0, 0, 1, 5)
+        self.bMatrixValueLabels: list[list[QtWidgets.QLabel]] = []
+        left_bracket = QtWidgets.QLabel("⎡\n⎢\n⎣")
+        right_bracket = QtWidgets.QLabel("⎤\n⎥\n⎦")
+        left_bracket.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        right_bracket.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.bMatrixLayout.addWidget(left_bracket, 1, 0, 3, 1)
+        self.bMatrixLayout.addWidget(right_bracket, 1, 4, 3, 1)
+        for row in range(3):
+            row_labels: list[QtWidgets.QLabel] = []
+            for column in range(3):
+                value_label = QtWidgets.QLabel("—")
+                value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                value_label.setMinimumWidth(48)
+                self.bMatrixLayout.addWidget(value_label, row + 1, column + 1)
+                row_labels.append(value_label)
+            self.bMatrixValueLabels.append(row_labels)
+        self.bMatrixUnitsLabel = QtWidgets.QLabel("s/mm²")
+        self.bMatrixUnitsLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.bMatrixLayout.addWidget(self.bMatrixUnitsLabel, 4, 0, 1, 5)
+
         self.channelsLayout.addWidget(self.channelFilter)
         self.channelsLayout.addLayout(self.channelButtonLayout)
-        self.channelsLayout.addWidget(self.channelScrollArea)
+        self.channelsLayout.addWidget(self.channelScrollArea, stretch=1)
+        self.channelsLayout.addWidget(self.bMatrixGroup)
 
         self.settingsTab = QtWidgets.QWidget()
         self.settingsLayout = QVBoxLayout(self.settingsTab)

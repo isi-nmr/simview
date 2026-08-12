@@ -737,7 +737,7 @@ class CursorPlot(pg.PlotWidget):
 
         label_parts = []
         main_window = self.get_main_window()
-        trajectory_labels = {"Gradient Trajectory", "Gradient Trajectory Residual"}
+        trajectory_labels = {"Gradient Trajectory", "Effective Gradient", "Effective Trajectory", "Gradient Trajectory Residual"}
         plot_index = main_window.plots.index(self) if main_window is not None and self in main_window.plots else -1
         is_interpolated_trajectory = (
             plot_index >= 0
