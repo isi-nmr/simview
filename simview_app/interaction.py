@@ -935,10 +935,12 @@ class InteractionMixin:
         acquisition_details = self.get_acquisition_window_details()
         acquisition_windows = [(float(item["start"]), float(item["end"])) for item in acquisition_details]
         echo_candidates = self.find_trajectory_echo_candidates()
+        spin_echoes = self.find_spin_echo_candidates()
         zero_time = getattr(self, "trajectoryZeroReferenceTime", None)
         for channel, plot in zip(getattr(self, "channels", []), getattr(self, "plots", []), strict=False):
             plot.clear_annotation_markers(group="trajectory_flip")
             plot.clear_annotation_markers(group="trajectory_echo")
+            plot.clear_annotation_markers(group="spin_echo")
             plot.clear_annotation_markers(group="trajectory_zero")
             plot.clear_annotation_markers(group="trajectory_excitation_reset")
             plot.clear_overlay_regions(group="acquisition_window")
@@ -986,6 +988,15 @@ class InteractionMixin:
                     color="#006b3c" if in_acquisition else "#8a6500",
                     group="trajectory_echo",
                 )
+            for candidate in spin_echoes:
+                echo_time = float(candidate["time"])
+                in_acquisition = any(start <= echo_time <= end for start, end in acquisition_windows)
+                plot.add_annotation_marker(
+                    echo_time,
+                    "SE in ADC" if in_acquisition else "SE (90°–180°)",
+                    color="#7b2cbf" if in_acquisition else "#9c36b5",
+                    group="spin_echo",
+                )
 
         self.refresh_trajectory_flip_table()
         self.refresh_coherence_results()
@@ -1000,6 +1011,19 @@ class InteractionMixin:
         if table is None:
             return
         table.clear()
+        for candidate in self.find_spin_echo_candidates():
+            time_value = float(candidate["time"])
+            job = next(
+                (str(item.get("job_type", "ADC")) for item in details if float(item["start"]) <= time_value <= float(item["end"])),
+                "outside ADC",
+            )
+            item = QtWidgets.QListWidgetItem(
+                f"SE {self.format_time(time_value)} | {job} | "
+                f"90° {self.format_time(float(candidate['excitation_time']))} → "
+                f"180° {self.format_time(float(candidate['refocus_time']))}",
+            )
+            item.setData(Qt.ItemDataRole.UserRole, time_value)
+            table.addItem(item)
         for candidate in self.find_trajectory_echo_candidates():
             time_value = float(candidate["time"])
             job = next(
@@ -1013,6 +1037,45 @@ class InteractionMixin:
             )
             item.setData(Qt.ItemDataRole.UserRole, time_value)
             table.addItem(item)
+
+    def find_spin_echo_candidates(self) -> list[dict[str, float]]:
+        """Predict Hahn spin echoes produced by detected 90°–180° pairs."""
+        channel_times = [
+            np.asarray(line.get("t", []), dtype=float)
+            for channel in getattr(self, "channels", [])
+            for line in channel[:1]
+            if np.asarray(line.get("t", []), dtype=float).size
+        ]
+        if not channel_times:
+            return []
+        start_time = min(float(time[0]) for time in channel_times)
+        end_time = max(float(time[-1]) for time in channel_times)
+        excitations = self.get_trajectory_excitation_times(np.asarray([start_time, end_time], dtype=float))
+        if excitations.size == 0:
+            return []
+        refocuses = sorted({
+            float(value) for value in getattr(self, "trajectoryRefocusTimes", [])
+            if np.isfinite(float(value)) and start_time <= float(value) <= end_time
+        })
+        candidates: list[dict[str, float]] = []
+        for refocus_time in refocuses:
+            excitation_index = int(np.searchsorted(excitations, refocus_time, side="left") - 1)
+            if excitation_index < 0:
+                continue
+            excitation_time = float(excitations[excitation_index])
+            echo_time = 2.0 * refocus_time - excitation_time
+            next_excitation = (
+                float(excitations[excitation_index + 1])
+                if excitation_index + 1 < excitations.size else end_time
+            )
+            if echo_time < refocus_time or echo_time > next_excitation + 1e-12:
+                continue
+            candidates.append({
+                "time": echo_time,
+                "excitation_time": excitation_time,
+                "refocus_time": refocus_time,
+            })
+        return candidates
 
     def jump_to_echo_result(self, item: QtWidgets.QListWidgetItem) -> None:
         self.jump_to_rf_pulse_time(float(item.data(Qt.ItemDataRole.UserRole)))

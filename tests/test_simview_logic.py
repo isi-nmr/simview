@@ -1178,6 +1178,24 @@ def test_trajectory_echo_and_acquisition_window_are_marked(app_logic: GUIapp) ->
     assert (2.0, "Echo in ADC", "#006b3c") in app_logic.plots[0].markers
 
 
+def test_spin_echo_is_predicted_from_90_180_pair(app_logic: GUIapp) -> None:
+    app_logic.channels = [[{"chanLabel": "Effective Trajectory", "t": np.array([0.0, 10.0])}]]
+    app_logic.trajectoryRefocusTimes = [4.0]
+    app_logic.get_trajectory_excitation_times = lambda _time: np.array([1.0])
+
+    candidates = app_logic.find_spin_echo_candidates()
+
+    assert candidates == [{"time": 7.0, "excitation_time": 1.0, "refocus_time": 4.0}]
+
+
+def test_spin_echo_does_not_cross_into_next_excitation_block(app_logic: GUIapp) -> None:
+    app_logic.channels = [[{"chanLabel": "Effective Trajectory", "t": np.array([0.0, 10.0])}]]
+    app_logic.trajectoryRefocusTimes = [4.0]
+    app_logic.get_trajectory_excitation_times = lambda _time: np.array([1.0, 6.0])
+
+    assert app_logic.find_spin_echo_candidates() == []
+
+
 def test_trajectory_zero_marker_is_added_to_derived_coherence_plots(app_logic: GUIapp) -> None:
     app_logic.trajectoryZeroReferenceTime = 1.25
     app_logic.channels = [
