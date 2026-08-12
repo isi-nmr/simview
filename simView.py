@@ -49,6 +49,7 @@ class GUIapp(
         self.pulseProgramSource = None
         self.pulseProgramTimeline = None
         self.pulseProgramLineMapping = {}
+        self.pulseProgramStructure = {}
         self.rfPulseStartTimes = None
         self.rfPulseFocusTimes = None
         self.gradientCalibrationHzPerMm = 0.0
@@ -358,6 +359,26 @@ class GUIapp(
         self.measurementsLayout.setContentsMargins(10, 10, 10, 10)
         self.measurementsLayout.setSpacing(10)
 
+        self.sequenceTab = QtWidgets.QWidget()
+        self.sequenceLayout = QVBoxLayout(self.sequenceTab)
+        self.sequenceLayout.setContentsMargins(10, 10, 10, 10)
+        self.sequenceLayout.setSpacing(8)
+        self.sequenceHint = QtWidgets.QLabel(
+            "Pulse-program schematic with RF, gradient, delay, acquisition, and cycle structure."
+        )
+        self.sequenceHint.setWordWrap(True)
+        self.openSequenceSchematicButton = QtWidgets.QPushButton("Open Pulse Sequence Schematic")
+        self.openSequenceSchematicButton.setObjectName("primaryButton")
+        self.openSequenceSchematicButton.clicked.connect(self.show_sequence_schematic)
+        self.sequenceTreeWidget = QtWidgets.QTreeWidget()
+        self.sequenceTreeWidget.setHeaderLabels(["Sequence event", "Time / delay"])
+        self.sequenceTreeWidget.setAlternatingRowColors(True)
+        self.sequenceTreeWidget.setUniformRowHeights(True)
+        self.sequenceTreeWidget.itemDoubleClicked.connect(self.jump_to_sequence_tree_item)
+        self.sequenceLayout.addWidget(self.sequenceHint)
+        self.sequenceLayout.addWidget(self.openSequenceSchematicButton)
+        self.sequenceLayout.addWidget(self.sequenceTreeWidget, stretch=1)
+
         self.measurementsListWidget = QtWidgets.QListWidget()
         self.measurementsListWidget.itemDoubleClicked.connect(self.jump_to_measurement_item)
         self.measurementsListWidget.currentItemChanged.connect(self.on_measurement_selection_changed)
@@ -522,6 +543,7 @@ class GUIapp(
         self.measurementsLayout.addWidget(self.exportMeasurementsButton)
 
         self.sideTabs.addTab(self.channelsTab, "Channels")
+        self.sideTabs.addTab(self.sequenceTab, "Sequence")
         self.sideTabs.addTab(self.settingsTab, "Settings")
         self.sideTabs.addTab(self.measurementsTab, "Measurements")
         self.sidePanelLayout.addWidget(self.sideTabs)

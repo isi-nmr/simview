@@ -63,6 +63,194 @@ def read_origin_rf_pulse_calibrations(sim_path: str) -> tuple[str | None, list[d
     return str(acquisition_path), calibrations
 
 
+def read_pulse_program_structure(
+    sim_path: str,
+    pulse_program: str | None,
+    pulse_program_path: str | None = None,
+) -> dict[str, object]:
+    """Extract the exact precompiled PPG used by the simulation and loop counts."""
+    output_path = Path(sim_path) / "_FCube1.output"
+    try:
+        text = output_path.read_text(errors="replace")
+    except OSError:
+        return {}
+    main_source = Path(pulse_program or "").name
+    precomp_match = re.search(r"^pulse program:\s*(.+?)\s*$", text, re.MULTILINE)
+    precomp_path = Path(precomp_match.group(1)) if precomp_match else None
+    records: list[dict[str, object]] = []
+    if precomp_path is not None:
+        try:
+            precomp_lines = precomp_path.read_text(errors="replace").splitlines()
+        except OSError:
+            precomp_lines = []
+        current_source = main_source
+        current_source_path = str(precomp_path)
+        current_line = 1
+        directive_pattern = re.compile(r'^\s*#\s+(\d+)\s+"([^"]+)"(?:\s+\d+)*\s*$')
+        for raw_line in precomp_lines:
+            directive = directive_pattern.match(raw_line)
+            if directive:
+                current_line = int(directive.group(1))
+                current_source_path = directive.group(2)
+                current_source = Path(current_source_path).name
+                if not main_source or current_source.endswith(".ppg"):
+                    main_source = current_source
+                continue
+            records.append({
+                "source": current_source,
+                "source_path": current_source_path,
+                "line": current_line,
+                "text": raw_line.strip(),
+            })
+            current_line += 1
+
+    # Older output formats may not retain or expose pulseprogram.precomp.
+    record_pattern = re.compile(r'^\s*\d+\s+"\'([^\']+)\': line (\d+)--->(.*)"$', re.MULTILINE)
+    records_by_location: dict[tuple[str, int], dict[str, object]] = {}
+    for source, line, source_text in record_pattern.findall(text):
+        # Later entries are the expanded/selected source listing. Earlier
+        # compiler diagnostics can reuse a source name with shifted line text.
+        records_by_location[(source, int(line))] = {
+            "source": source, "line": int(line), "text": source_text.strip(),
+        }
+    if not records:
+        records = list(records_by_location.values())
+    if not records and pulse_program_path:
+        source_path = Path(pulse_program_path)
+        try:
+            source_lines = source_path.read_text(errors="replace").splitlines()
+        except OSError:
+            source_lines = []
+        if source_lines:
+            records = [record for record in records if record["source"] != main_source]
+            records.extend(
+                {"source": main_source, "line": line_number, "text": source_text.strip()}
+                for line_number, source_text in enumerate(source_lines, start=1)
+            )
+
+    loop_values: dict[str, int] = {}
+    loop_match = re.search(r"loopcounters:\s*256 items\s*=+\s*(.*?)(?:\n\s*\n\s*delay increments)", text, re.DOTALL)
+    loop_array = [int(value) for value in re.findall(r"\b\d+\b", loop_match.group(1))] if loop_match else []
+    for name, index in re.findall(r"^\s*(l\d+):\s+14\s+(\d+)\b", text, re.MULTILINE):
+        array_index = int(index)
+        if array_index < len(loop_array):
+            loop_values[name] = loop_array[array_index]
+    parameters: dict[str, object] = {"ACQ_scan_type": "Scan_Experiment"}
+    delay_match = re.search(
+        r"delays \[sec\]:\s*256 items\s*=+\s*(.*?)(?=\n\s*pulses \[usec\])",
+        text, re.DOTALL,
+    )
+    delay_values = [float(value) for value in re.findall(
+        r"[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?", delay_match.group(1),
+    )] if delay_match else []
+    parameters.update({f"d{index}": value for index, value in enumerate(delay_values[:256])})
+    pulse_match = re.search(
+        r"pulses \[usec\]:\s*256 items\s*=+\s*(.*?)(?=\n\s*loopcounters:)",
+        text, re.DOTALL,
+    )
+    pulse_values = [float(value) * 1e-6 for value in re.findall(
+        r"[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?", pulse_match.group(1),
+    )] if pulse_match else []
+    parameters.update({f"p{index}": value for index, value in enumerate(pulse_values[:256])})
+    for name, array_index in re.findall(r"^\s*([A-Za-z_]\w*):\s+2\s+(\d+)\b", text, re.MULTILINE):
+        index = int(array_index)
+        if index < len(delay_values):
+            parameters[name] = delay_values[index]
+    for name, array_index in re.findall(r"^\s*([A-Za-z_]\w*):\s+4\s+(\d+)\b", text, re.MULTILINE):
+        index = int(array_index)
+        if index < len(pulse_values):
+            parameters[name] = pulse_values[index]
+    origin_path = find_origin_acquisition_path(sim_path)
+    if origin_path is not None:
+        try:
+            method_text = (origin_path / "method").read_text(errors="replace")
+        except OSError:
+            method_text = ""
+        for name, raw_value in re.findall(r"^##\$(\w+)=([^\r\n]*)", method_text, re.MULTILINE):
+            value = raw_value.strip().strip("<>")
+            try:
+                parameters[name] = float(value)
+            except ValueError:
+                parameters[name] = value
+        parameters.update(_read_jcamp_numeric_parameters(origin_path / "method"))
+        acqp_parameters = _read_jcamp_numeric_parameters(origin_path / "acqp")
+        parameters.update(acqp_parameters)
+        # The PPG symbol ``de`` is the ACQP DE hardware delay, stored in µs.
+        if isinstance(acqp_parameters.get("DE"), (int, float)):
+            parameters["de"] = float(acqp_parameters["DE"]) * 1e-6
+        gradient_registers = acqp_parameters.get("ACQ_gradient_amplitude", [])
+        if isinstance(gradient_registers, list):
+            parameters.update({f"g{index}": value for index, value in enumerate(gradient_registers)})
+    gradient_ramps: list[list[float]] = []
+    gradient_output_path = Path(sim_path) / "_GCube.output"
+    try:
+        gradient_output = gradient_output_path.read_text(errors="replace")
+    except OSError:
+        gradient_output = ""
+    ramp_matches = list(re.finditer(
+        r"^ramp\s+(\d+):\s+(\d+)\s+items\s*\n-+\s*\n(.*?)(?=\n\s*(?:ramp\s+\d+:|pulse increments|\Z))",
+        gradient_output, re.MULTILINE | re.DOTALL,
+    ))
+    for match in ramp_matches:
+        ramp_index, expected_count = int(match.group(1)), int(match.group(2))
+        values = [float(value) for value in re.findall(r"[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?", match.group(3))]
+        if len(values) < expected_count:
+            continue
+        while len(gradient_ramps) <= ramp_index:
+            gradient_ramps.append([])
+        # Include exact endpoints; the output table stores intermediate DAC
+        # fractions only for the default constant-time ramps.
+        gradient_ramps[ramp_index] = [0.0, *values[:expected_count], 1.0]
+    configured_ramp_ms = parameters.get("PVM_RampTime")
+    configured_ramp_seconds = (
+        float(configured_ramp_ms) * 1e-3
+        if isinstance(configured_ramp_ms, (int, float)) and configured_ramp_ms > 0 else None
+    )
+    return {
+        "source": main_source, "records": records, "loop_values": loop_values,
+        "parameters": parameters, "output": str(output_path),
+        "precomp": str(precomp_path) if precomp_path is not None else None,
+        "gradient_ramps": gradient_ramps,
+        # Ramp tables define normalized interpolation only. ParaVision's
+        # physical transition time is configured independently in milliseconds.
+        "gradient_ramp_durations": [
+            configured_ramp_seconds if configured_ramp_seconds is not None else max(0, len(ramp) - 1) * 1e-6
+            for ramp in gradient_ramps
+        ],
+        "gradient_ramp_time_source": "PVM_RampTime" if configured_ramp_seconds is not None else "Gcon raster fallback",
+    }
+
+
+def _read_jcamp_numeric_parameters(path: Path) -> dict[str, object]:
+    """Read scalar and numeric-array values from a Bruker JCAMP parameter file."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return {}
+    entries = list(re.finditer(r"^##\$(\w+)=([^\r\n]*)", text, re.MULTILINE))
+    result: dict[str, object] = {}
+    for index, match in enumerate(entries):
+        name, header = match.group(1), match.group(2).strip()
+        if header.startswith("("):
+            body_end = entries[index + 1].start() if index + 1 < len(entries) else len(text)
+            body = text[match.end():body_end]
+            values: list[float] = []
+            for token in re.findall(r"@\d+\*\([-+]?\d+(?:\.\d+)?\)|[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?", body):
+                repeated = re.fullmatch(r"@(\d+)\*\(([-+]?\d+(?:\.\d+)?)\)", token)
+                if repeated:
+                    values.extend([float(repeated.group(2))] * int(repeated.group(1)))
+                else:
+                    values.append(float(token))
+            if values:
+                result[name] = values
+            continue
+        try:
+            result[name] = float(header.strip("<>"))
+        except ValueError:
+            pass
+    return result
+
+
 def bruker_pw_attenuation_db_to_watts(attenuation_db: np.ndarray | float, reference_watts: float) -> np.ndarray:
     att = np.asarray(attenuation_db, dtype=float)
     # Bruker "pw" is attenuation in dB, so linear power scales by 10^(-dB/10).
@@ -554,7 +742,10 @@ def getRFEvents(
     ncos = {}
 
     pulse_program = dict["pulseprogram"]
-    info = {"pulProg": pulse_program["@path"].split("/")[-1]}
+    info = {
+        "pulProg": pulse_program["@path"].split("/")[-1],
+        "pulProgPath": pulse_program["@path"],
+    }
     ind = 0
     tUnit = float(pulse_program["@timeunit"])
 
@@ -1021,6 +1212,9 @@ def parseBrkrChannels(
     emit_progress(98, "Finalizing Bruker channels")
     info["originAcquisitionPath"] = origin_path
     info["rfPulseCalibrations"] = rf_pulse_calibrations
+    info["pulseProgramStructure"] = read_pulse_program_structure(
+        path, str(info.get("pulProg", "")), str(info.get("pulProgPath", "")),
+    )
     return channels, info
 
 

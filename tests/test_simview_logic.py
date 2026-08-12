@@ -18,6 +18,7 @@ from utils.simUtilsBrkr import (
     readGrads,
     readBrkrChannels,
     read_all_fcube_event_infos,
+    read_pulse_program_structure,
 )
 from utils.simUtilsNMRScopeB import readNMRScopeBChannels
 
@@ -822,6 +823,108 @@ def test_get_rf_events_parses_line_mapping_and_timeline() -> None:
     assert np.isclose(float(info["events"][2]["t"]), 200e-6)
 
 
+def test_output_structure_keeps_unexecuted_ppg_loops(tmp_path: Path) -> None:
+    (tmp_path / "_FCube1.output").write_text(
+        "loopcounters: 256 items\n=======================\n 0 3 0\n\n\n"
+        "delay increments [sec]: 64 items\n"
+        " l1:  14   1  0  1 in lines: 12\n"
+        " 10 \"'demo.ppg': line 10---> echo, d3 grad_ramp{1, 0, 0}\"\n"
+        " 11 \"'demo.ppg': line 11---> (p1:sp1 ph1):f1\"\n"
+        " 12 \"'demo.ppg': line 12---> lo to echo times l1\"\n",
+    )
+
+    structure = read_pulse_program_structure(str(tmp_path), "demo.ppg")
+
+    assert structure["loop_values"]["l1"] == 3
+    assert [record["line"] for record in structure["records"]] == [10, 11, 12]
+
+
+def test_output_structure_prefers_exact_precompiled_ppg_with_modules(tmp_path: Path) -> None:
+    module_path = tmp_path / "pulseprogram.precomp"
+    module_path.write_text(
+        '# 10 "/pp/demo.ppg"\n'
+        'start, 10u\n'
+        ';EXEC_begin Prep Prep()\n'
+        '# 4 "/pp/Prep.mod" 1\n'
+        '20u grad_ramp{g1, 0, 0}\n'
+        ';EXEC_end Prep\n'
+        '# 11 "/pp/demo.ppg" 2\n'
+        '(p0:sp0 ph0):f1\n'
+    )
+    (tmp_path / "_FCube1.output").write_text(f"pulse program: {module_path}\n")
+
+    structure = read_pulse_program_structure(str(tmp_path), "demo.ppg")
+
+    assert structure["precomp"] == str(module_path)
+    assert [(record["source"], record["line"]) for record in structure["records"]] == [
+        ("demo.ppg", 10), ("demo.ppg", 11), ("Prep.mod", 4),
+        ("Prep.mod", 5), ("demo.ppg", 11),
+    ]
+    assert structure["records"][2]["text"] == "20u grad_ramp{g1, 0, 0}"
+
+
+def test_output_structure_reads_precalculated_gradient_ramps(tmp_path: Path) -> None:
+    (tmp_path / "_FCube1.output").write_text("")
+    (tmp_path / "_GCube.output").write_text(
+        "Gcon: Ramp Shape Values\n"
+        "-----------------------\n\n"
+        "ramp    0: 3 items\n"
+        "------------------\n"
+        " 0.25 0.50 0.75\n\n"
+        "ramp    1: 2 items\n"
+        "------------------\n"
+        " 0.33 0.66\n\n"
+        "pulse increments [usec]: 64 items\n"
+    )
+
+    structure = read_pulse_program_structure(str(tmp_path), "demo.ppg")
+
+    assert structure["gradient_ramps"] == [
+        [0.0, 0.25, 0.5, 0.75, 1.0],
+        [0.0, 0.33, 0.66, 1.0],
+    ]
+    assert structure["gradient_ramp_time_source"] == "Gcon raster fallback"
+
+
+def test_full_ppg_uses_method_loop_counts_and_omits_subroutine_calls(app_logic: GUIapp) -> None:
+    app_logic.pulseProgramStructure = {
+        "records": [
+            {"source": "demo.ppg", "line": 1, "text": "define loopcounter Echoes = {$PVM_RareFactor}"},
+            {"source": "demo.ppg", "line": 2, "text": "echo, 10u"},
+            {"source": "demo.ppg", "line": 3, "text": "subr DisabledModule"},
+            {"source": "demo.ppg", "line": 4, "text": "lo to echo times Echoes"},
+        ],
+        "parameters": {"PVM_RareFactor": 8.0},
+        "loop_values": {},
+    }
+
+    events = app_logic.build_full_ppg_schematic_events()
+
+    assert not any(event["kind"] == "subroutine" for event in events)
+    assert next(event for event in events if event["kind"] == "loop")["count"] == 8
+
+
+def test_ppg_duration_resolves_d_array_and_defined_delay_math(app_logic: GUIapp) -> None:
+    app_logic.pulseProgramStructure = {"parameters": {"d3": 144e-6, "DE": 10e-6}}
+
+    assert np.isclose(app_logic.resolve_ppg_duration("d3"), 144e-6)
+    assert np.isclose(
+        app_logic.resolve_ppg_duration("denab", {"denab": "d3 - de"}),
+        134e-6,
+    )
+    assert np.isclose(
+        app_logic.resolve_ppg_duration("d5m40u", {"d5m40u": "d3 - 40u"}),
+        104e-6,
+    )
+
+
+def test_ppg_condition_resolves_paravision_diffusion_mode_enum(app_logic: GUIapp) -> None:
+    parameters = {"PVM_DiffPrepMode": "SpinEcho"}
+
+    assert app_logic.evaluate_ppg_condition("PVM_DiffPrepMode == 0", parameters) is True
+    assert app_logic.evaluate_ppg_condition("PVM_DiffPrepMode == 1", parameters) is False
+
+
 def test_get_rf_events_captures_all_given_event_attributes() -> None:
     pulse_program = {
         "pulseprogram": {
@@ -951,6 +1054,36 @@ def test_get_pulse_program_location_uses_nearest_previous_event(app_logic: GUIap
     assert app_logic.get_pulse_program_location(0.0005) == "-"
     assert app_logic.get_pulse_program_location(0.0024) == "SliceSelection.mod:40 (ln 193)"
     assert app_logic.get_pulse_program_location(0.0031) == "DWELL-PROGRAM:0 (ln 8000000)"
+
+
+def test_sequence_outline_nests_ppg_modules_and_gradients_in_cycles(app_logic: GUIapp) -> None:
+    app_logic.pulseProgramTimeline = (
+        np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        np.array([10, 11, 20, 10, 11]),
+    )
+    app_logic.pulseProgramLineMapping = {
+        10: {"source": "main.ppg", "line": 10},
+        11: {"source": "main.ppg", "line": 11},
+        20: {"source": "Slice.mod", "line": 5},
+    }
+    app_logic.channels = [[{
+        "type": "grads", "key": "Gx", "t": np.array([0.0, 1.5, 2.5, 4.0]),
+        "raw_data": np.array([0.0, 20.0, 0.0, 0.0]),
+    }]]
+    app_logic.get_trajectory_excitation_times = lambda _time: np.array([1.0, 3.0])
+
+    outline = app_logic.build_sequence_outline()
+
+    assert [cycle["label"] for cycle in outline] == ["Preparation", "Cycle 1", "Cycle 2"]
+    assert [module["source"] for module in outline[1]["modules"]] == ["main.ppg", "Slice.mod"]
+    gradient_descriptions = [
+        gradient["description"]
+        for module in outline[1]["modules"]
+        for event in module["events"]
+        for gradient in event["gradients"]
+    ]
+    assert gradient_descriptions == ["Gx=20%", "Gx=0%"]
+    assert outline[1]["modules"][0]["events"][0]["delay"] == pytest.approx(1.0)
 
 
 def test_read_nmrscopeb_channels_accepts_list_based_time_payload() -> None:

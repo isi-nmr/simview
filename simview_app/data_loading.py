@@ -196,6 +196,9 @@ class DataLoadingMixin:
         self.pulseProgramSource = None
         self.pulseProgramTimeline = None
         self.pulseProgramLineMapping = {}
+        self.pulseProgramStructure = {}
+        if hasattr(self, "sequenceTreeWidget"):
+            self.sequenceTreeWidget.clear()
         self.rfPulseStartTimes = None
         self.rfPulseFocusTimes = None
         if hasattr(self, "prevRfPulseButton"):
@@ -334,9 +337,11 @@ class DataLoadingMixin:
             info.get("lineEventNumbers"),
         )
         self.pulseProgramLineMapping = info.get("lineMapping", {})
+        self.pulseProgramStructure = dict(info.get("pulseProgramStructure", {}))
         self.acquisitionWindowDetails = list(info.get("sampleAcquisitionWindows", []))
         self.originAcquisitionPath = info.get("originAcquisitionPath")
         self.rfPulseCalibrations = list(info.get("rfPulseCalibrations", []))
+        self.refresh_sequence_tree()
         if source:
             self.setWindowTitle(f"{self.dataPath} originPPG: {source}")
 

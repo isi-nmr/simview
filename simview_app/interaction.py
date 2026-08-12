@@ -1,5 +1,6 @@
 import os
 import re
+import ast
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,963 @@ from .constants import _UNSET
 
 
 class InteractionMixin:
+    def build_sequence_outline(self) -> list[dict]:
+        """Build a compact cycle/module/event hierarchy from simulator timing."""
+        timeline = getattr(self, "pulseProgramTimeline", None)
+        if timeline is None or len(timeline) != 2:
+            return []
+        raw_times = np.asarray(timeline[0], dtype=float)
+        raw_lines = np.asarray(timeline[1], dtype=int)
+        if raw_times.size == 0 or raw_lines.size == 0:
+            return []
+        count = min(raw_times.size, raw_lines.size)
+        order = np.argsort(raw_times[:count], kind="stable")
+        raw_times, raw_lines = raw_times[:count][order], raw_lines[:count][order]
+
+        # Collapse repeated XML samples which point to the same source line.
+        ppg_events: list[dict] = []
+        previous_signature: tuple[str, int] | None = None
+        for time_value, internal_line in zip(raw_times, raw_lines, strict=True):
+            mapping = getattr(self, "pulseProgramLineMapping", {}).get(int(internal_line), {})
+            source = str(mapping.get("source", "PPG"))
+            source_line = int(mapping.get("line", 0))
+            signature = (source, source_line)
+            if signature == previous_signature:
+                continue
+            previous_signature = signature
+            ppg_events.append({
+                "time": float(time_value), "source": source, "line": source_line,
+                "internal_line": int(internal_line), "gradients": [],
+            })
+
+        gradient_channel = next(
+            (channel for channel in getattr(self, "channels", []) if channel and channel[0].get("type") == "grads"),
+            [],
+        )
+        gradient_events: list[tuple[float, str]] = []
+        if gradient_channel:
+            common_time = np.unique(np.concatenate([
+                np.asarray(line.get("t", []), dtype=float) for line in gradient_channel
+                if np.asarray(line.get("t", []), dtype=float).size
+            ]))
+            previous = np.zeros(len(gradient_channel), dtype=float)
+            for time_value in common_time:
+                values = np.asarray([
+                    float(np.interp(time_value, np.asarray(line.get("t", []), dtype=float),
+                                    np.asarray(line.get("raw_data", line.get("data", [])), dtype=float)))
+                    for line in gradient_channel
+                ])
+                changed = ~np.isclose(values, previous, atol=1e-12, rtol=0.0)
+                if np.any(changed):
+                    parts = [
+                        f"{gradient_channel[index].get('key', f'G{index + 1}')}={values[index]:.4g}%"
+                        for index in np.flatnonzero(changed)
+                    ]
+                    gradient_events.append((float(time_value), ", ".join(parts)))
+                previous = values
+
+        event_times = np.asarray([event["time"] for event in ppg_events], dtype=float)
+        for grad_time, description in gradient_events:
+            index = int(np.searchsorted(event_times, grad_time, side="right") - 1)
+            if index >= 0:
+                ppg_events[index]["gradients"].append({"time": grad_time, "description": description})
+
+        extent = float(max(raw_times[-1], max((time for time, _ in gradient_events), default=raw_times[-1])))
+        excitations = self.get_trajectory_excitation_times(np.asarray([float(raw_times[0]), extent]))
+        boundaries = np.concatenate(([float(raw_times[0])], excitations, [extent + 1e-15]))
+        cycles: list[dict] = []
+        for boundary_index in range(len(boundaries) - 1):
+            start, end = float(boundaries[boundary_index]), float(boundaries[boundary_index + 1])
+            events = [event for event in ppg_events if start <= float(event["time"]) < end]
+            if not events:
+                continue
+            label = "Preparation" if boundary_index == 0 and excitations.size else f"Cycle {boundary_index if excitations.size else 1}"
+            modules: list[dict] = []
+            for event_index, event in enumerate(events):
+                delay = max(
+                    (float(events[event_index + 1]["time"]) if event_index + 1 < len(events) else end)
+                    - float(event["time"]),
+                    0.0,
+                )
+                event["delay"] = delay
+                if not modules or modules[-1]["source"] != event["source"]:
+                    modules.append({"source": event["source"], "events": []})
+                modules[-1]["events"].append(event)
+            cycles.append({"label": label, "start": start, "end": end, "modules": modules})
+        return cycles
+
+    def refresh_sequence_tree(self) -> None:
+        tree = self.__dict__.get("sequenceTreeWidget")
+        if tree is None:
+            return
+        tree.clear()
+        for cycle in self.build_sequence_outline():
+            cycle_item = QtWidgets.QTreeWidgetItem([
+                str(cycle["label"]),
+                f"{self.format_time(float(cycle['start']))} – {self.format_time(float(cycle['end']))}",
+            ])
+            cycle_item.setData(0, Qt.ItemDataRole.UserRole, float(cycle["start"]))
+            tree.addTopLevelItem(cycle_item)
+            for module in cycle["modules"]:
+                events = module["events"]
+                module_item = QtWidgets.QTreeWidgetItem([
+                    str(module["source"]),
+                    f"{self.format_time(float(events[0]['time']))} – {self.format_time(float(events[-1]['time']))}",
+                ])
+                module_item.setData(0, Qt.ItemDataRole.UserRole, float(events[0]["time"]))
+                cycle_item.addChild(module_item)
+                for event in events:
+                    delay = float(event["delay"])
+                    text = f"line {event['line']}"
+                    event_item = QtWidgets.QTreeWidgetItem([
+                        text,
+                        f"{self.format_time(float(event['time']))}  Δ {self.format_time(delay)}",
+                    ])
+                    event_item.setData(0, Qt.ItemDataRole.UserRole, float(event["time"]))
+                    event_item.setToolTip(0, f"Internal line {event['internal_line']}")
+                    module_item.addChild(event_item)
+                    gradients = event["gradients"]
+                    if gradients:
+                        examples = list(dict.fromkeys(str(item["description"]) for item in gradients))[:3]
+                        suffix = " …" if len(gradients) > len(examples) else ""
+                        gradient_item = QtWidgets.QTreeWidgetItem([
+                            f"Gradient changes ({len(gradients)}): " + "; ".join(examples) + suffix,
+                            (
+                                self.format_time(float(gradients[0]["time"]))
+                                if len(gradients) == 1 else
+                                f"{self.format_time(float(gradients[0]['time']))} – "
+                                f"{self.format_time(float(gradients[-1]['time']))}"
+                            ),
+                        ])
+                        gradient_item.setData(0, Qt.ItemDataRole.UserRole, float(gradients[0]["time"]))
+                        event_item.addChild(gradient_item)
+        tree.resizeColumnToContents(0)
+
+    def jump_to_sequence_tree_item(self, item: QtWidgets.QTreeWidgetItem, _column: int = 0) -> None:
+        time_value = item.data(0, Qt.ItemDataRole.UserRole)
+        if time_value is not None:
+            self.jump_to_rf_pulse_time(float(time_value))
+
+    def show_sequence_schematic(self) -> None:
+        outline = self.build_sequence_outline()
+        structure = getattr(self, "pulseProgramStructure", {})
+        if not outline and not structure:
+            QtWidgets.QMessageBox.information(self, "Pulse Sequence", "No timed PPG data is loaded.")
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Pulse Sequence Schematic")
+        dialog.resize(1200, 720)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        controls = QtWidgets.QHBoxLayout()
+        controls.addWidget(QtWidgets.QLabel("Section:"))
+        section_combo = QtWidgets.QComboBox()
+        if structure:
+            section_combo.addItem("Full PPG — all loops", "structure")
+        for index, cycle in enumerate(outline):
+            section_combo.addItem(str(cycle["label"]), ("executed", index))
+        controls.addWidget(section_combo)
+        controls.addStretch(1)
+        controls.addWidget(QtWidgets.QLabel("Wheel: zoom   Drag: pan   Double-click: reset"))
+        layout.addLayout(controls)
+        schematic = pg.PlotWidget(background="#f3f3f3")
+        schematic.showGrid(x=True, y=False, alpha=0.15)
+        schematic.setLabel("bottom", "Time", units="s")
+        schematic.getPlotItem().hideButtons()
+        layout.addWidget(schematic, stretch=1)
+        details = QtWidgets.QLabel()
+        details.setWordWrap(True)
+        layout.addWidget(details)
+
+        cursor_time = getattr(self, "currentCursorTime", None)
+        initial_index = 0
+        if cursor_time is not None and not structure:
+            for index, cycle in enumerate(outline):
+                if float(cycle["start"]) <= float(cursor_time) <= float(cycle["end"]):
+                    initial_index = index
+                    break
+
+        def render(combo_index: int) -> None:
+            selection = section_combo.itemData(combo_index)
+            if selection == "structure":
+                self.render_full_ppg_schematic(schematic)
+                details.setText(
+                    "Complete preprocessed PPG structure from _FCube1.output. Loop bodies are drawn once and "
+                    "bracketed with their resolved or symbolic repeat count; this view is not limited by XML execution time."
+                )
+                return
+            cycle_index = int(selection[1])
+            cycle = outline[cycle_index]
+            self.render_sequence_schematic(schematic, cycle)
+            details.setText(
+                f"Executed {cycle['label']}: {self.format_time(float(cycle['start']))} – "
+                f"{self.format_time(float(cycle['end']))}. Exact RF and gradient shapes from the simulated XML timeline."
+            )
+
+        section_combo.currentIndexChanged.connect(render)
+        section_combo.setCurrentIndex(initial_index)
+        render(initial_index)
+        close_buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        close_buttons.rejected.connect(dialog.reject)
+        layout.addWidget(close_buttons)
+        dialog.exec()
+
+    def build_full_ppg_schematic_events(self) -> list[dict]:
+        structure = getattr(self, "pulseProgramStructure", {})
+        # pulseprogram.precomp is already in compiler/execution order. Do not
+        # sort it by source line: included module bodies deliberately jump
+        # between files and may revisit the same source location.
+        records = list(structure.get("records", []))
+        active_records = self.select_active_ppg_records(records, structure.get("parameters", {}))
+        loop_aliases = {}
+        delay_aliases = {}
+        for record in records:
+            alias = re.match(
+                r"define\s+loopcounter\s+(\w+)\s*=\s*\{\s*\$?(\w+)\s*\}",
+                str(record.get("text", "")).strip(), re.IGNORECASE,
+            )
+            if alias:
+                loop_aliases[alias.group(1)] = alias.group(2)
+            delay_alias = re.match(
+                r'"?\s*([A-Za-z_]\w*)\s*=\s*([^";]+)"?$',
+                str(record.get("text", "")).strip(),
+            )
+            if delay_alias:
+                delay_aliases[delay_alias.group(1)] = delay_alias.group(2).strip()
+        events: list[dict] = []
+        module_stack: list[str] = []
+        gradient_order = 0
+        for record in active_records:
+            text = str(record.get("text", "")).strip()
+            lowered = text.lower()
+            exec_begin = re.match(r";\s*exec_begin\s+([A-Za-z_]\w*)", text, re.IGNORECASE)
+            exec_end = re.match(r";\s*exec_end\s+([A-Za-z_]\w*)", text, re.IGNORECASE)
+            if exec_begin:
+                module_stack.append(exec_begin.group(1))
+                continue
+            if exec_end:
+                if module_stack:
+                    module_stack.pop()
+                continue
+            if not text or text.startswith(";") or lowered.startswith("define ") or text in {"{", "}"}:
+                continue
+            if lowered.startswith(("if", "else", '"')):
+                continue
+            label_match = re.match(r"([A-Za-z_]\w*)\s*,", text)
+            label = label_match.group(1) if label_match else None
+            loop_match = re.search(r"\blo\s+to\s+(\w+)\s+times\s+([A-Za-z0-9_]+)", text, re.IGNORECASE)
+            subroutine_match = re.search(r"\bsubr\s+(\w+)", text, re.IGNORECASE)
+            if loop_match:
+                kind = "loop"
+            elif re.search(r"\bgrad_(?:ramp|off)\b", lowered):
+                kind = "gradient"
+            elif re.search(r"\([^)]*:[^)]*\)\s*:f\d", text, re.IGNORECASE):
+                kind = "rf"
+            elif re.search(r"\b(?:aq|adc)_[A-Za-z0-9_]+", text, re.IGNORECASE):
+                kind = "acquisition"
+            elif subroutine_match:
+                # pulseprogram.precomp expands the called body immediately
+                # after this line. The call itself has no duration or physical
+                # waveform and would make disabled modules look active.
+                continue
+            elif re.match(r"(?:\w+\s*,\s*)?(?:\d+(?:\.\d+)?[umn]?|[dD]\w*)\b", text):
+                kind = "delay"
+            elif "goto" in lowered:
+                kind = "flow"
+            else:
+                continue
+            event = {
+                "kind": kind, "line": int(record["line"]), "text": text, "label": label,
+                "source": str(record.get("source", "")),
+                "module": module_stack[-1] if module_stack else None,
+            }
+            duration_token = self.get_ppg_duration_token(text)
+            if kind == "rf":
+                pulse_token = re.search(r"\(\s*([A-Za-z_]\w*)\s*:", text)
+                duration_token = pulse_token.group(1) if pulse_token else duration_token
+            elif kind == "acquisition" and not duration_token:
+                explicit_delays = re.search(r"\)\s*\(([^)]*)\)", text)
+                if explicit_delays:
+                    values = re.findall(r"\d+(?:\.\d+)?[mun]", explicit_delays.group(1))
+                    if values:
+                        event["duration"] = sum(
+                            self.resolve_ppg_duration(value) or 0.0 for value in values
+                        )
+            if kind == "acquisition" and text.lower().startswith(("aq_", "aqjob")):
+                acquisition_ms = structure.get("parameters", {}).get("PVM_AcquisitionTime")
+                if isinstance(acquisition_ms, (int, float)):
+                    event["duration"] = float(acquisition_ms) * 1e-3
+            if duration_token:
+                event["duration_token"] = duration_token
+                resolved_duration = self.resolve_ppg_duration(duration_token, delay_aliases)
+                if resolved_duration is not None:
+                    event["duration"] = resolved_duration
+            if loop_match:
+                count_token = loop_match.group(2)
+                event["count_token"] = count_token
+                event["target"] = loop_match.group(1)
+                count = structure.get("loop_values", {}).get(count_token)
+                if count is None:
+                    count = structure.get("parameters", {}).get(count_token, count_token)
+                if count == count_token and count_token in loop_aliases:
+                    parameter_name = loop_aliases[count_token]
+                    count = structure.get("parameters", {}).get(parameter_name, count_token)
+                if isinstance(count, str) and re.fullmatch(r"\d+", count):
+                    count = int(count)
+                if isinstance(count, float) and count.is_integer():
+                    count = int(count)
+                event["count"] = count
+            if kind == "gradient":
+                event["gradient_order"] = gradient_order
+                gradient_order += 1
+            events.append(event)
+        return self.expand_ppg_imaging_loops(events)
+
+    def expand_ppg_imaging_loops(self, events: list[dict]) -> list[dict]:
+        """Annotate nested echo bodies with their varying phase encodes."""
+        annotated = [dict(event) for event in events]
+        for loop_index in range(len(annotated) - 1, -1, -1):
+            loop = annotated[loop_index]
+            count = loop.get("count")
+            if loop.get("kind") != "loop" or loop.get("target") != "echo":
+                continue
+            if not isinstance(count, int) or not 1 < count <= 32:
+                continue
+            body_start = next(
+                (index for index in range(loop_index - 1, -1, -1)
+                 if annotated[index].get("label") == loop.get("target")),
+                None,
+            )
+            if body_start is None:
+                continue
+            for event in annotated[body_start:loop_index]:
+                if event.get("kind") == "gradient" and "ACQ_spatial_phase_" in str(event.get("text", "")):
+                    event["phase_encode_indices"] = list(range(count))
+        return annotated
+
+    def evaluate_ppg_condition(self, expression: str, parameters: dict) -> bool | None:
+        expression = expression.strip()
+        unary = re.fullmatch(r"!?\s*([A-Za-z_]\w*)", expression)
+        if unary and unary.group(1) in parameters:
+            value = parameters[unary.group(1)]
+            enabled = str(value).strip("<> ").lower() not in {
+                "", "0", "0.0", "off", "no", "false", "none",
+            }
+            return not enabled if expression.lstrip().startswith("!") else enabled
+        match = re.search(r"([A-Za-z_]\w*)\s*(==|!=|>=|<=|>|<)\s*([A-Za-z_]\w*|[-+]?\d+(?:\.\d+)?)", expression)
+        if not match:
+            return None
+        left_name, operator, right_token = match.groups()
+        if left_name not in parameters:
+            return None
+        left = parameters[left_name]
+        right = parameters.get(right_token, right_token)
+        enum_values = {
+            "PVM_DiffPrepMode": {
+                "spinecho": 0.0,
+                "stimulatedecho": 1.0,
+                "double spinecho": 2.0,
+                "doublespinecho": 2.0,
+            },
+        }
+        if left_name in enum_values and isinstance(left, str):
+            normalized_enum = re.sub(r"[_-]+", " ", left.strip("<> ").lower())
+            left = enum_values[left_name].get(normalized_enum, enum_values[left_name].get(normalized_enum.replace(" ", ""), left))
+        try:
+            left, right = float(left), float(right)
+        except (TypeError, ValueError):
+            left, right = str(left).strip("<>"), str(right).strip("<>")
+        return {
+            "==": left == right, "!=": left != right, ">": left > right,
+            "<": left < right, ">=": left >= right, "<=": left <= right,
+        }[operator]
+
+    def select_active_ppg_records(self, records: list[dict], parameters: dict) -> list[dict]:
+        """Select one basic if/else path using resolved method parameters."""
+        selected: list[dict] = []
+        active_stack = [{"active": True, "condition": True, "parent": True}]
+        pending_condition: bool | None = None
+        last_closed: dict | None = None
+        for record in records:
+            text = str(record.get("text", "")).strip()
+            if_match = re.match(r"if\s*\((.*)\)\s*$", text, re.IGNORECASE)
+            if if_match:
+                evaluated = self.evaluate_ppg_condition(if_match.group(1), parameters)
+                # Unknown runtime conditions use the primary branch only;
+                # importantly, they never include both if and else bodies.
+                pending_condition = True if evaluated is None else evaluated
+                continue
+            if re.match(r"else\b", text, re.IGNORECASE):
+                pending_condition = not bool(last_closed and last_closed["condition"])
+                continue
+            if text == "{":
+                condition = True if pending_condition is None else pending_condition
+                parent_active = bool(active_stack[-1]["active"])
+                active_stack.append({
+                    "active": parent_active and condition,
+                    "condition": condition,
+                    "parent": parent_active,
+                })
+                pending_condition = None
+                last_closed = None
+                continue
+            if text == "}":
+                if len(active_stack) > 1:
+                    last_closed = active_stack.pop()
+                continue
+            if active_stack[-1]["active"]:
+                selected.append(record)
+        return selected
+
+    def render_full_ppg_schematic(self, plot: pg.PlotWidget) -> None:
+        plot.clear()
+        events = self.build_full_ppg_schematic_events()
+        lanes = {"RF": 4.0, "Gx": 3.0, "Gy": 2.0, "Gz": 1.0, "ADC": 0.0}
+        plot.getPlotItem().getAxis("left").setTicks([[(value, name) for name, value in lanes.items()]])
+        plot.getPlotItem().getAxis("bottom").setTicks([])
+        plot.setLabel("bottom", "Pulse-program order (loop bodies shown once)")
+        plot.setYRange(-0.9, 6.5, padding=0)
+        widths = {"rf": 1.0, "gradient": 1.0, "acquisition": 1.0, "subroutine": 0.0, "delay": 0.15, "flow": 0.0, "loop": 0.0}
+        x = 0.0
+        label_positions: dict[str, list[float]] = {}
+        positioned: list[tuple[dict, float, float]] = []
+        for event in events:
+            event_width = widths[event["kind"]]
+            duration = event.get("duration")
+            if isinstance(duration, (int, float)) and duration > 0:
+                # Preserve exact duration ratios for RF/ADC and gradient-scale
+                # timing. Only standalone idle periods are capped.
+                linear_width = duration / 50e-6
+                event_width = float(np.clip(linear_width, 0.08, 8.0)) if event["kind"] == "delay" else float(max(linear_width, 0.08))
+            positioned.append((event, x, x + event_width))
+            if event.get("label"):
+                label_positions.setdefault(str(event["label"]), []).append(x)
+            x += event_width
+        total_width = max(x, 1.0)
+        plot.setXRange(0.0, total_width, padding=0.015)
+        for value in lanes.values():
+            plot.plot([0.0, total_width], [value, value], pen=pg.mkPen("#777777"))
+
+        loop_row_ends: list[float] = []
+        gradient_states: list[list[float]] = [[0.0], [0.0], [0.0]]
+        for event, left, right in positioned:
+            center = (left + right) * 0.5
+            kind, text = str(event["kind"]), str(event["text"])
+            if kind != "gradient":
+                for axis_index, states in enumerate(gradient_states):
+                    for state in states:
+                        if abs(state) <= 1e-12:
+                            continue
+                        lane = (3.0, 2.0, 1.0)[axis_index]
+                        plot.plot([left, right], [lane + 0.42 * state] * 2, pen=pg.mkPen(
+                            ("#15803d", "#dc2626", "#2563eb")[axis_index], width=1.1,
+                        ))
+            if kind == "rf":
+                label = re.search(r"\(([^):]+)", text)
+                caption = label.group(1).strip() if label else f"RF line {event['line']}"
+                template = self.get_ppg_rf_shape_template(caption)
+                template_x = np.linspace(left, right, template.size)
+                curve = plot.plot(template_x, 4.0 + 0.68 * template, pen=pg.mkPen("#7b2cbf", width=1.6))
+                rf_tooltip = self.ppg_rf_tooltip(event, caption)
+                curve.setToolTip(rf_tooltip)
+                self.add_schematic_hover_region(plot, left, right, 3.92, 4.82, rf_tooltip)
+                item = pg.TextItem(caption, color="#5b21b6", anchor=(0.5, 1.0), angle=-45)
+                item.setPos(center, 4.78)
+                plot.addItem(item)
+            elif kind == "gradient":
+                component_match = re.search(r"\{([^}]*)\}", text)
+                components = [part.strip() for part in component_match.group(1).split(",")] if component_match else []
+                if "magnet_coord" in text or "rps_coord" in text or len(components) != 3:
+                    active_axes = range(3)
+                else:
+                    active_axes = [
+                        index for index, component in enumerate(components)
+                        if component not in {"0", "0.0"} or any(abs(state) > 1e-12 for state in gradient_states[index])
+                    ]
+                for axis_index in active_axes:
+                    lane = (3.0, 2.0, 1.0)[axis_index]
+                    component = (
+                        components[axis_index] if len(components) == 3 else
+                        components[0] if len(components) == 1 else "G"
+                    )
+                    phase_indices = event.get("phase_encode_indices", [0])
+                    if "grad_off" in text.lower() or component in {"0", "0.0"}:
+                        targets = [0.0]
+                    else:
+                        targets = []
+                        for phase_index in phase_indices:
+                            resolved = self.resolve_ppg_gradient_component(component, axis_index, int(phase_index))
+                            targets.append(float(np.clip(resolved / 100.0, -1.0, 1.0)) if resolved is not None else (
+                                -0.82 if component.lstrip().startswith("-") else 0.82
+                            ))
+                    ramps = getattr(self, "pulseProgramStructure", {}).get("gradient_ramps", [])
+                    ramp = np.asarray(ramps[axis_index], dtype=float) if axis_index < len(ramps) else np.asarray([])
+                    if ramp.size < 2:
+                        ramp = np.asarray([0.0, 1.0])
+                    ramp_durations = getattr(self, "pulseProgramStructure", {}).get("gradient_ramp_durations", [])
+                    ramp_duration = (
+                        float(ramp_durations[axis_index]) if axis_index < len(ramp_durations)
+                        else float(event.get("duration") or 0.0)
+                    )
+                    event_duration = float(event.get("duration") or ramp_duration)
+                    ramp_fraction = min(1.0, ramp_duration / event_duration) if event_duration > 0 else 1.0
+                    starts = gradient_states[axis_index]
+                    if len(starts) == 1 and len(targets) > 1:
+                        starts = starts * len(targets)
+                    elif len(targets) == 1 and len(starts) > 1:
+                        targets = targets * len(starts)
+                    ramp_right = left + (right - left) * ramp_fraction
+                    shape_x = np.linspace(left, ramp_right, ramp.size)
+                    for start_state, target in zip(starts, targets, strict=False):
+                        shape = start_state + ramp * (target - start_state)
+                        shape_y = lane + 0.42 * shape
+                        curve = plot.plot(shape_x, shape_y, pen=pg.mkPen(
+                            ("#15803d", "#dc2626", "#2563eb")[axis_index], width=1.1,
+                        ))
+                        gradient_tooltip = self.ppg_gradient_tooltip(event, axis_index, component, targets)
+                        curve.setToolTip(gradient_tooltip)
+                        if ramp_right < right:
+                            hold = plot.plot([ramp_right, right], [lane + 0.42 * target] * 2, pen=pg.mkPen(
+                                ("#15803d", "#dc2626", "#2563eb")[axis_index], width=1.1,
+                            ))
+                            hold.setToolTip(self.ppg_gradient_tooltip(event, axis_index, component, targets))
+                    self.add_schematic_hover_region(plot, left, right, lane - 0.48, lane + 0.48, gradient_tooltip)
+                    gradient_states[axis_index] = targets
+            elif kind == "acquisition":
+                region = pg.LinearRegionItem((left, right), movable=False, brush=pg.mkBrush(70, 120, 210, 45), pen=None)
+                region.setZValue(-10)
+                plot.addItem(region)
+                plot.plot([left, right], [0.28, 0.28], pen=pg.mkPen("#1d4ed8", width=3))
+                item = pg.TextItem("acq", color="#1d4ed8", anchor=(0.5, 1.0))
+                item.setPos(center, 0.38)
+                plot.addItem(item)
+
+            elif kind == "subroutine":
+                region = pg.LinearRegionItem((left, right), movable=False, brush=pg.mkBrush(100, 116, 139, 25), pen=pg.mkPen(100, 116, 139, 90))
+                region.setZValue(-20)
+                plot.addItem(region)
+                item = pg.TextItem(str(event.get("name", "subroutine")), color="#334155", anchor=(0.5, 0.0), angle=-45)
+                item.setPos(center, 5.05)
+                plot.addItem(item)
+            elif kind == "delay" and right - left > 0:
+                delay_curve = plot.plot([left, left, right, right], [-0.35, -0.48, -0.48, -0.35], pen=pg.mkPen("#4b5563"))
+                token = str(event.get("duration_token") or re.split(r"\s+", text.replace(",", " ").strip())[0])
+                duration = event.get("duration")
+                delay_curve.setToolTip(
+                    f"PPG delay: {token}\nResolved value: {self.format_time(float(duration)) if isinstance(duration, (int, float)) else 'unresolved'}\n"
+                    f"Source: {event.get('source')}:{event.get('line')}\n{text}"
+                )
+                self.add_schematic_hover_region(plot, left, right, -0.82, -0.25, delay_curve.toolTip())
+                item = pg.TextItem(token, color="#374151", anchor=(0.5, 0.0), angle=-45)
+                item.setPos(center, -0.62)
+                plot.addItem(item)
+            elif kind == "loop":
+                count = event.get("count")
+                if isinstance(count, (int, float)) and count <= 1:
+                    continue
+                candidates = [
+                    position for position in label_positions.get(str(event.get("target", "")), [])
+                    if position <= left
+                ]
+                if not candidates:
+                    continue
+                target_x = candidates[-1]
+                row = next(
+                    (index for index, occupied_until in enumerate(loop_row_ends)
+                     if target_x > occupied_until + total_width * 0.01),
+                    len(loop_row_ends),
+                )
+                if row == len(loop_row_ends):
+                    loop_row_ends.append(right)
+                else:
+                    loop_row_ends[row] = right
+                y = 5.18 + 0.16 * row
+                bracket = plot.plot([target_x, target_x, right, right], [y - 0.1, y, y, y - 0.1], pen=pg.mkPen("#111827", width=1.3))
+                bracket.setToolTip(
+                    f"Loop target: {event.get('target')}\nCount expression: {event.get('count_token')}\n"
+                    f"Resolved count: {event.get('count')}\nSource: {event.get('source')}:{event.get('line')}"
+                )
+                self.add_schematic_hover_region(plot, target_x, right, y - 0.12, y + 0.12, bracket.toolTip())
+                loop_name = {
+                    "decr": "dummy echoes",
+                    "navigator": "navigator",
+                    "echo": "RARE echoes",
+                    "slice": "slices",
+                    "acc": "averages",
+                    "start": str(event.get("count_token", "scan")),
+                }.get(str(event.get("target", "")), str(event.get("target", "loop")))
+                item = pg.TextItem(
+                    f"{loop_name} ×{event.get('count', '?')}", color="#111827", anchor=(0.5, 0.0),
+                )
+                item.setPos((target_x + right) * 0.5, y)
+                plot.addItem(item)
+
+    def add_schematic_hover_region(
+        self, plot: pg.PlotWidget, left: float, right: float, bottom: float, top: float, tooltip: str,
+    ) -> None:
+        """Add a transparent, easy-to-hit tooltip target over a schematic item."""
+        width = max(right - left, 0.08)
+        hitbox = QtWidgets.QGraphicsRectItem(left, bottom, width, top - bottom)
+        hitbox.setPen(QtGui.QPen(Qt.PenStyle.NoPen))
+        hitbox.setBrush(QtGui.QBrush(QtGui.QColor(0, 0, 0, 1)))
+        hitbox.setAcceptHoverEvents(True)
+        hitbox.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        hitbox.setToolTip(tooltip)
+        hitbox.setZValue(50)
+        plot.addItem(hitbox)
+
+    def ppg_gradient_tooltip(self, event: dict, axis_index: int, component: str, targets: list[float]) -> str:
+        axis = ("Gx", "Gy", "Gz")[axis_index]
+        parameters = getattr(self, "pulseProgramStructure", {}).get("parameters", {})
+        referenced = []
+        for name in dict.fromkeys(re.findall(r"[A-Za-z_]\w*", component)):
+            if name in parameters:
+                value = parameters[name]
+                if isinstance(value, list):
+                    value = f"array[{len(value)}]"
+                referenced.append(f"{name}={value}")
+        resolved = ", ".join(f"{100.0 * value:.4g}%" for value in targets)
+        return (
+            f"{axis} PPG expression: {component}\nResolved target(s): {resolved}\n"
+            f"Duration: {self.format_time(event.get('duration'))}\n"
+            f"Ramp time: {self.format_time(getattr(self, 'pulseProgramStructure', {}).get('gradient_ramp_durations', [None] * 3)[axis_index])}\n"
+            f"ParaVision/ACQP: {', '.join(referenced) if referenced else 'no named parameter'}\n"
+            f"Source: {event.get('source')}:{event.get('line')}\n{event.get('text')}"
+        )
+
+    def ppg_rf_tooltip(self, event: dict, symbol: str) -> str:
+        calibrations = list(getattr(self, "rfPulseCalibrations", []))
+        normalized = re.sub(r"[^a-z0-9]", "", symbol.lower())
+        matching = next(
+            (calibration for calibration in calibrations
+             if normalized and normalized in re.sub(r"[^a-z0-9]", "", str(calibration.get("name", "")).lower())),
+            None,
+        )
+        if matching is None:
+            expected_name = "excpulse" if normalized == "p0" else "refpulse" if normalized == "p1" else ""
+            matching = next(
+                (calibration for calibration in calibrations
+                 if expected_name in re.sub(r"[^a-z0-9]", "", str(calibration.get("name", "")).lower())),
+                None,
+            ) if expected_name else None
+        pv = "not matched"
+        if matching:
+            pv = (
+                f"{matching.get('name')}, duration={self.format_time(matching.get('duration'))}, "
+                f"flip={matching.get('flip_angle')}°"
+            )
+        return (
+            f"PPG RF pulse: {symbol}\nDuration: {self.format_time(event.get('duration'))}\n"
+            f"ParaVision pulse: {pv}\nSource: {event.get('source')}:{event.get('line')}\n{event.get('text')}"
+        )
+
+    def resolve_ppg_gradient_component(
+        self, expression: str, axis_index: int = 0, phase_encode_index: int = 0,
+    ) -> float | None:
+        """Resolve simple PPG gradient arithmetic from method/acqp parameters."""
+        parameters = getattr(self, "pulseProgramStructure", {}).get("parameters", {})
+        cleaned = expression.replace("[]", "").strip()
+        try:
+            tree = ast.parse(cleaned, mode="eval")
+        except SyntaxError:
+            return None
+
+        def evaluate(node: ast.AST) -> float:
+            if isinstance(node, ast.Expression): return evaluate(node.body)
+            if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)): return float(node.value)
+            if isinstance(node, ast.Name):
+                value = parameters.get(node.id)
+                if value is None and node.id.startswith("ACQ_spatial_phase_"):
+                    return 0.0
+                if isinstance(value, (int, float)): return float(value)
+                if isinstance(value, list):
+                    value_index = phase_encode_index if node.id.startswith("ACQ_spatial_phase_") else axis_index
+                    if value_index < len(value) and isinstance(value[value_index], (int, float)):
+                        return float(value[value_index])
+                raise ValueError
+            if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+                value = evaluate(node.operand)
+                return value if isinstance(node.op, ast.UAdd) else -value
+            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
+                left, right = evaluate(node.left), evaluate(node.right)
+                if isinstance(node.op, ast.Add): return left + right
+                if isinstance(node.op, ast.Sub): return left - right
+                if isinstance(node.op, ast.Mult): return left * right
+                return left / right
+            raise ValueError
+        try:
+            return evaluate(tree)
+        except (ValueError, ZeroDivisionError):
+            return None
+
+    def get_ppg_duration_token(self, text: str) -> str | None:
+        """Return the duration field preceding a PPG action."""
+        body = re.sub(r"^\s*[A-Za-z_]\w*\s*,\s*", "", text).strip()
+        match = re.match(r"([A-Za-z_]\w*|\d+(?:\.\d+)?(?:[mun])?)\b", body)
+        return match.group(1) if match else None
+
+    def resolve_ppg_duration(self, token: str, aliases: dict[str, str] | None = None) -> float | None:
+        """Resolve a PPG delay token to seconds using the output D array."""
+        parameters = getattr(self, "pulseProgramStructure", {}).get("parameters", {})
+        aliases = aliases or {}
+        expression = aliases.get(token, token).strip()
+        expression = re.sub(r"(\d+(?:\.\d+)?)\s*m\b", r"(\1*1e-3)", expression)
+        expression = re.sub(r"(\d+(?:\.\d+)?)\s*u\b", r"(\1*1e-6)", expression)
+        expression = re.sub(r"(\d+(?:\.\d+)?)\s*n\b", r"(\1*1e-9)", expression)
+        try:
+            tree = ast.parse(expression, mode="eval")
+        except SyntaxError:
+            return None
+
+        def evaluate(node: ast.AST) -> float:
+            if isinstance(node, ast.Expression): return evaluate(node.body)
+            if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)): return float(node.value)
+            if isinstance(node, ast.Name):
+                value = parameters.get(node.id)
+                if value is None:
+                    value = next(
+                        (candidate for name, candidate in parameters.items() if str(name).lower() == node.id.lower()),
+                        None,
+                    )
+                if value is None and node.id.startswith("ACQ_spatial_phase_"):
+                    return 0.0
+                if isinstance(value, (int, float)): return float(value)
+                raise ValueError
+            if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+                value = evaluate(node.operand)
+                return value if isinstance(node.op, ast.UAdd) else -value
+            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
+                left, right = evaluate(node.left), evaluate(node.right)
+                if isinstance(node.op, ast.Add): return left + right
+                if isinstance(node.op, ast.Sub): return left - right
+                if isinstance(node.op, ast.Mult): return left * right
+                return left / right
+            raise ValueError
+        try:
+            return max(0.0, evaluate(tree))
+        except (ValueError, ZeroDivisionError):
+            return None
+
+    def get_ppg_rf_shape_template(self, symbol: str) -> np.ndarray:
+        """Reuse a measured RF envelope as a normalized PPG shape template."""
+        rf_lines = [
+            line for channel in getattr(self, "channels", []) for line in channel
+            if str(line.get("type", "")).upper() == "NCO" and str(line.get("key", "")).lower() == "am"
+        ]
+        pulses = self.detect_rf_pulse_descriptors()
+        if not rf_lines or not pulses:
+            phase = np.linspace(-np.pi, np.pi, 65)
+            return np.sinc(phase / np.pi) ** 2
+        normalized_symbol = re.sub(r"[^a-z0-9]", "", symbol.lower())
+        preferred_index = 0
+        if "p1" in normalized_symbol or "ref" in normalized_symbol:
+            preferred_index = min(1, len(pulses) - 1)
+        elif "dw" in normalized_symbol:
+            preferred_index = min(1, len(pulses) - 1)
+        pulse = pulses[preferred_index]
+        matching_line = next((line for line in rf_lines if str(line.get("ind", "")) == str(pulse.get("nco", ""))), rf_lines[0])
+        time = np.asarray(matching_line.get("t", []), dtype=float)
+        data = np.asarray(matching_line.get("data", []), dtype=float)
+        sample_time = np.linspace(float(pulse["start"]), float(pulse["end"]), 65)
+        envelope = np.interp(sample_time, time, data)
+        peak = max(float(np.max(np.abs(envelope))), 1e-12)
+        return envelope / peak
+
+    def get_ppg_gradient_shape_template(self, event: dict) -> list[np.ndarray] | None:
+        """Return the real output waveform generated by this PPG source line."""
+        timeline = getattr(self, "pulseProgramTimeline", None)
+        mapping = getattr(self, "pulseProgramLineMapping", {})
+        if timeline is None or len(timeline) != 2:
+            return None
+        times = np.asarray(timeline[0], dtype=float)
+        internal_lines = np.asarray(timeline[1], dtype=int)
+        if times.size < 2 or internal_lines.size != times.size:
+            return None
+        event_source = Path(str(event.get("source", ""))).name
+        event_line = int(event.get("line", -1))
+        candidates = [
+            index for index, internal_line in enumerate(internal_lines[:-1])
+            if Path(str(mapping.get(int(internal_line), {}).get("source", ""))).name == event_source
+            and int(mapping.get(int(internal_line), {}).get("line", -9999)) == event_line
+            and times[index + 1] > times[index]
+        ]
+        gradient_channel = next(
+            (channel for channel in getattr(self, "channels", []) if channel and channel[0].get("type") == "grads"),
+            [],
+        )
+        if not gradient_channel:
+            return None
+        best_shapes: list[np.ndarray] | None = None
+        best_peak = 0.0
+        for index in candidates:
+            start, end = float(times[index]), float(times[index + 1])
+            sample_time = np.linspace(start, end, 65)
+            shapes = []
+            for axis in range(3):
+                if axis >= len(gradient_channel):
+                    shapes.append(np.zeros(sample_time.size))
+                    continue
+                line = gradient_channel[axis]
+                line_time = np.asarray(line.get("t", []), dtype=float)
+                line_data = np.asarray(line.get("raw_data", line.get("data", [])), dtype=float)
+                shapes.append(np.interp(sample_time, line_time, line_data) if line_time.size else np.zeros(sample_time.size))
+            peak = max(float(np.max(np.abs(shape))) for shape in shapes)
+            if peak > best_peak:
+                best_peak, best_shapes = peak, shapes
+        if best_shapes is None or best_peak <= 1e-12:
+            return None
+        return [shape / best_peak for shape in best_shapes]
+
+    def render_sequence_schematic(self, plot: pg.PlotWidget, cycle: dict) -> None:
+        plot.clear()
+        start, end = float(cycle["start"]), float(cycle["end"])
+        width = max(end - start, 1e-12)
+        pulses = [
+            pulse for pulse in self.detect_rf_pulse_descriptors()
+            if float(pulse["end"]) >= start and float(pulse["start"]) < end
+        ]
+        acquisition_windows = [
+            (max(window_start, start), min(window_end, end))
+            for window_start, window_end in self.detect_acquisition_windows()
+            if window_end >= start and window_start < end
+        ]
+        active_intervals = [(float(pulse["start"]), float(pulse["end"])) for pulse in pulses]
+        active_intervals.extend(acquisition_windows)
+        gradient_channel = next(
+            (channel for channel in getattr(self, "channels", []) if channel and channel[0].get("type") == "grads"),
+            [],
+        )
+        for line in gradient_channel:
+            time = np.asarray(line.get("t", []), dtype=float)
+            data = np.asarray(line.get("raw_data", line.get("data", [])), dtype=float)
+            active_mask = (time >= start) & (time < end) & (np.abs(data) > 1e-12)
+            active_starts = np.flatnonzero(active_mask & np.concatenate(([True], ~active_mask[:-1])))
+            active_ends = np.flatnonzero(active_mask & np.concatenate((~active_mask[1:], [True])))
+            active_intervals.extend(
+                (float(time[first]), float(time[last]))
+                for first, last in zip(active_starts, active_ends, strict=True)
+            )
+        active_intervals.sort()
+        merged_intervals: list[list[float]] = []
+        margin = width * 0.002
+        for interval_start, interval_end in active_intervals:
+            interval_start, interval_end = max(start, interval_start - margin), min(end, interval_end + margin)
+            if merged_intervals and interval_start <= merged_intervals[-1][1] + margin:
+                merged_intervals[-1][1] = max(merged_intervals[-1][1], interval_end)
+            else:
+                merged_intervals.append([interval_start, interval_end])
+        breakpoints = sorted({start, end, *(value for interval in merged_intervals for value in interval)})
+        active_total = sum(interval[1] - interval[0] for interval in merged_intervals)
+        idle_cap = max(active_total * 0.08, width * 0.003, 1e-9)
+        mapped_breakpoints = [0.0]
+        for left, right in zip(breakpoints[:-1], breakpoints[1:], strict=True):
+            midpoint = (left + right) * 0.5
+            is_active = any(interval[0] <= midpoint <= interval[1] for interval in merged_intervals)
+            mapped_breakpoints.append(mapped_breakpoints[-1] + ((right - left) if is_active else min(right - left, idle_cap)))
+
+        def map_time(values):
+            return np.interp(values, np.asarray(breakpoints), np.asarray(mapped_breakpoints))
+
+        mapped_start, mapped_end = float(map_time(start)), float(map_time(end))
+        lane_positions = {"RF": 4.0, "Gx": 3.0, "Gy": 2.0, "Gz": 1.0, "ADC": 0.0}
+        axis = plot.getPlotItem().getAxis("left")
+        axis.setTicks([[(position, label) for label, position in lane_positions.items()]])
+        bottom_axis = plot.getPlotItem().getAxis("bottom")
+        bottom_axis.setTicks([[
+            (mapped_start, self.format_time(start)),
+            (mapped_end, self.format_time(end)),
+        ]])
+        plot.setLabel("bottom", "Sequence time (long idle delays compressed)")
+        plot.setYRange(-0.8, 5.55, padding=0)
+        plot.setXRange(mapped_start, mapped_end, padding=0.01)
+
+        for position in lane_positions.values():
+            plot.plot([mapped_start, mapped_end], [position, position], pen=pg.mkPen("#777777", width=1))
+
+        rf_lines = [
+            line for channel in getattr(self, "channels", []) for line in channel
+            if str(line.get("type", "")).upper() == "NCO" and str(line.get("key", "")).lower() == "am"
+        ]
+        for line in rf_lines:
+            time = np.asarray(line.get("t", []), dtype=float)
+            data = np.asarray(line.get("data", []), dtype=float)
+            mask = (time >= start) & (time < end)
+            if not np.any(mask):
+                continue
+            peak = max(float(np.max(np.abs(data[mask]))), 1e-12)
+            plot.plot(map_time(time[mask]), lane_positions["RF"] + 0.72 * data[mask] / peak, pen=pg.mkPen("#7b2cbf", width=1.5))
+
+        colors = {"x": "#15803d", "y": "#dc2626", "z": "#2563eb"}
+        for line in gradient_channel:
+            gradient_axis = self.classify_gradient_axis(line)
+            if gradient_axis is None:
+                continue
+            time = np.asarray(line.get("t", []), dtype=float)
+            data = np.asarray(line.get("raw_data", line.get("data", [])), dtype=float)
+            mask = (time >= start) & (time < end)
+            if not np.any(mask):
+                continue
+            peak = max(float(np.max(np.abs(data[mask]))), 1e-12)
+            lane = lane_positions[f"G{gradient_axis}"]
+            plot.plot(map_time(time[mask]), lane + 0.38 * data[mask] / peak, pen=pg.mkPen(colors[gradient_axis], width=1.4))
+
+        for visible_start, visible_end in acquisition_windows:
+            mapped_window_start, mapped_window_end = map_time([visible_start, visible_end])
+            region = pg.LinearRegionItem(
+                values=(mapped_window_start, mapped_window_end), orientation="vertical", movable=False,
+                brush=pg.mkBrush(70, 120, 210, 45), pen=pg.mkPen(70, 120, 210, 100),
+            )
+            region.setZValue(-10)
+            plot.addItem(region)
+            plot.plot([mapped_window_start, mapped_window_end], [0.25, 0.25], pen=pg.mkPen("#1d4ed8", width=3))
+            text = pg.TextItem("acq", color="#1d4ed8", anchor=(0.5, 1.0))
+            text.setPos((mapped_window_start + mapped_window_end) * 0.5, 0.35)
+            plot.addItem(text)
+
+        # Label calibrated RF pulses at their matched focus. Preparation pulses
+        # remain visible and named rather than being mistaken for excitations.
+        labelled_calibrations: set[str] = set()
+        for calibration in getattr(self, "rfPulseCalibrations", []):
+            for focus in self.match_rf_calibration_foci(calibration, pulses):
+                if not start <= focus < end:
+                    continue
+                label = str(calibration.get("name", "RF"))
+                if label in labelled_calibrations:
+                    continue
+                labelled_calibrations.add(label)
+                angle = float(calibration.get("flip_angle", 0.0))
+                text = pg.TextItem(f"{label}\n{angle:g}°", color="#5b21b6", anchor=(0.5, 1.0))
+                text.setPos(float(map_time(focus)), 4.82)
+                plot.addItem(text)
+
+        # Draw contiguous source-module spans above the waveform lanes.
+        labelled_modules: set[str] = set()
+        for module_index, module in enumerate(cycle["modules"]):
+            events = module["events"]
+            module_start = float(events[0]["time"])
+            module_end = min(float(events[-1]["time"]) + float(events[-1]["delay"]), end)
+            mapped_module_start, mapped_module_end = map_time([module_start, module_end])
+            plot.plot([mapped_module_start, mapped_module_start, mapped_module_end, mapped_module_end], [4.95, 5.08, 5.08, 4.95], pen=pg.mkPen("#374151"))
+            source = str(module["source"])
+            if source not in labelled_modules and mapped_module_end - mapped_module_start > (mapped_end - mapped_start) * 0.025:
+                labelled_modules.add(source)
+                text = pg.TextItem(source, color="#111827", anchor=(0.5, 0.0))
+                text.setPos((mapped_module_start + mapped_module_end) * 0.5, 5.08 + 0.16 * (module_index % 2))
+                plot.addItem(text)
+
+        # Mark only visually significant delays to prevent label collisions.
+        delays = [
+            event for module in cycle["modules"] for event in module["events"]
+            if float(event["delay"]) >= width * 0.015
+        ]
+        for event in sorted(delays, key=lambda item: float(item["delay"]), reverse=True)[:12]:
+            delay_start = float(event["time"])
+            delay_end = min(delay_start + float(event["delay"]), end)
+            mapped_delay_start, mapped_delay_end = map_time([delay_start, delay_end])
+            plot.plot([mapped_delay_start, mapped_delay_start, mapped_delay_end, mapped_delay_end], [-0.4, -0.52, -0.52, -0.4], pen=pg.mkPen("#4b5563"))
+            text = pg.TextItem(f"Δ {self.format_time(float(event['delay']))}", color="#374151", anchor=(0.5, 0.0))
+            text.setPos((mapped_delay_start + mapped_delay_end) * 0.5, -0.68)
+            plot.addItem(text)
+
     def format_measurement_entry(
         self,
         start_time: float,
