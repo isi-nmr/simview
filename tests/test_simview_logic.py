@@ -241,6 +241,37 @@ def test_b_matrix_at_cursor_integrates_effective_trajectory(app_logic: GUIapp) -
     np.testing.assert_allclose(matrix[:, 1:], 0.0)
 
 
+def test_b_matrix_is_zero_before_first_excitation(app_logic: GUIapp) -> None:
+    app_logic.channels = [[{
+        "chanLabel": "Effective Trajectory",
+        "units": "cycles/mm",
+        "t": np.array([0.0, 1.0, 2.0]),
+        "data": np.array([0.0, 1.0, 0.0]),
+    }]]
+    app_logic.get_trajectory_excitation_times = lambda _time: np.array([1.5])
+
+    matrix = app_logic.compute_b_matrix_at_time(1.49)
+
+    assert matrix is not None
+    np.testing.assert_allclose(matrix, np.zeros((3, 3)))
+
+
+def test_manual_zero_after_excitation_does_not_hide_b_matrix_origin(app_logic: GUIapp) -> None:
+    app_logic.trajectoryZeroReferenceTime = 1.1
+    app_logic.channels = [[{
+        "chanLabel": "Effective Trajectory",
+        "units": "cycles/mm",
+        "t": np.array([0.0, 1.0, 1.1, 2.0]),
+        "data": np.array([0.0, 0.0, 0.1, 1.0]),
+    }]]
+    app_logic.get_trajectory_excitation_times = lambda _time: np.array([1.0, 3.0])
+
+    matrix = app_logic.compute_b_matrix_at_time(2.0)
+
+    assert matrix is not None
+    assert matrix[0, 0] > 0.0
+
+
 def test_zero_trajectory_to_reference_interpolates_at_cursor_time(app_logic: GUIapp) -> None:
     app_logic.trajectoryZeroReferenceTime = 0.5
     time = np.array([0.0, 1.0, 2.0])
@@ -305,6 +336,48 @@ def test_trajectory_resets_at_each_calibrated_excitation_block(app_logic: GUIapp
     transformed = app_logic.apply_trajectory_refocuses(time, trajectory)
 
     np.testing.assert_allclose(transformed, np.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0]))
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["PVM_FovSatExcPulse", "PVM_FatSatExcPulse", "PVM_FatSupPulse", "PVM_MTPulse", "PrepPulse1"],
+)
+def test_preparation_pulse_names_are_not_trajectory_excitations(app_logic: GUIapp, name: str) -> None:
+    calibration = {"name": name, "duration": 0.5, "flip_angle": 90.0}
+
+    assert not app_logic.is_trajectory_excitation_calibration(calibration)
+
+
+def test_only_named_sequence_excitation_resets_trajectory(app_logic: GUIapp) -> None:
+    app_logic.rfPulseCalibrations = [
+        {"name": "PVM_FovSatExcPulse", "duration": 0.2, "flip_angle": 90.0},
+        {"name": "PVM_FatSatExcPulse", "duration": 0.3, "flip_angle": 90.0},
+        {"name": "ExcPulse1", "duration": 0.5, "flip_angle": 90.0},
+    ]
+    app_logic.detect_rf_pulse_descriptors = lambda: [
+        {"focus": 1.0, "duration": 0.2},
+        {"focus": 2.0, "duration": 0.3},
+        {"focus": 3.0, "duration": 0.5},
+    ]
+
+    reset_times = app_logic.get_trajectory_excitation_times(np.array([0.0, 4.0]))
+
+    np.testing.assert_allclose(reset_times, np.array([3.0]))
+
+
+def test_multi_lobe_excitation_is_matched_as_one_calibrated_pulse(app_logic: GUIapp) -> None:
+    app_logic.rfPulseCalibrations = [
+        {"name": "ExcPul", "duration": 2.7, "flip_angle": 90.0},
+    ]
+    app_logic.detect_rf_pulse_descriptors = lambda: [
+        {"start": 1.0, "end": 1.9, "focus": 1.45, "duration": 0.9, "nco": "1"},
+        {"start": 1.91, "end": 2.79, "focus": 2.35, "duration": 0.88, "nco": "1"},
+        {"start": 2.80, "end": 3.70, "focus": 3.25, "duration": 0.9, "nco": "1"},
+    ]
+
+    reset_times = app_logic.get_trajectory_excitation_times(np.array([0.0, 5.0]))
+
+    np.testing.assert_allclose(reset_times, np.array([2.35]))
 
 
 def test_coherence_order_toggles_at_flips_relative_to_selected_zero(app_logic: GUIapp) -> None:

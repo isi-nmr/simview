@@ -47,7 +47,9 @@ def read_origin_rf_pulse_calibrations(sim_path: str) -> tuple[str | None, list[d
     except OSError:
         return str(acquisition_path), []
     calibrations: list[dict[str, object]] = []
-    pattern = re.compile(r"^##\$(\w*(?:Exc|Ref|Rfc)Pulse\w*)=\(([^)]*)\)", re.MULTILINE)
+    # RF structures use both ``Pul`` (ExcPul, FovSatPul) and ``Pulse``
+    # (RefPulse1, DwRfcPulse1) naming across ParaVision methods.
+    pattern = re.compile(r"^##\$(\w*(?:Pul|Pulse)\d*)=\(([^)]*)\)", re.MULTILINE)
     for match in pattern.finditer(method_text):
         fields = [field.strip() for field in match.group(2).split(",")]
         if len(fields) < 3:

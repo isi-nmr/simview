@@ -851,7 +851,7 @@ class InteractionMixin:
         )
         excitation_calibrations = [
             item for item in all_calibrations
-            if abs(float(item.get("flip_angle", 0.0)) - 90.0) <= 10.0
+            if self.is_trajectory_excitation_calibration(item)
         ]
         added = 0
         refocus_index_in_block = 0

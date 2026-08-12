@@ -268,23 +268,70 @@ class CalculationMixin:
                 integrated[index + 1] = integrated[index] + sign * (integration_values[index + 1] - integration_values[index])
         return np.interp(time_array, integration_times, integrated)
 
+    def is_trajectory_excitation_calibration(self, calibration: dict) -> bool:
+        """Whether a method RF calibration represents the sequence excitation.
+
+        Flip angle alone is insufficient: preparation modules commonly contain
+        90-degree pulses too. Bruker method parameter names preserve their role,
+        so accept explicit excitation names after rejecting preparation names.
+        """
+        if abs(float(calibration.get("flip_angle", 0.0)) - 90.0) > 10.0:
+            return False
+        name = re.sub(r"[^a-z0-9]", "", str(calibration.get("name", "")).lower())
+        if not name:
+            return False
+        preparation_terms = (
+            "fatsat", "fatsup", "fatselect", "fovsat", "satband", "saturation",
+            "watersat", "watersup", "mtransfer", "magnetizationtransfer", "mtpulse",
+            "inversion", "invpulse", "preppulse", "navigator", "trigger",
+        )
+        if any(term in name for term in preparation_terms):
+            return False
+        return "excpul" in name or "excitationpul" in name
+
+    def match_rf_calibration_foci(self, calibration: dict, pulses: list[dict]) -> list[float]:
+        """Match one calibration to single- or multi-lobe detected RF pulses."""
+        duration = float(calibration.get("duration", 0.0))
+        if duration <= 0:
+            return []
+        def pulse_start(pulse: dict) -> float:
+            return float(pulse.get("start", float(pulse["focus"]) - 0.5 * float(pulse["duration"])))
+
+        def pulse_end(pulse: dict) -> float:
+            return float(pulse.get("end", float(pulse["focus"]) + 0.5 * float(pulse["duration"])))
+
+        ordered = sorted(pulses, key=pulse_start)
+        matches: list[float] = []
+        for start_index, first in enumerate(ordered):
+            for last in ordered[start_index:]:
+                # Do not combine pulses from different transmit channels.
+                if str(last.get("nco", "")) != str(first.get("nco", "")):
+                    continue
+                start = pulse_start(first)
+                end = pulse_end(last)
+                span = end - start
+                if np.isclose(span, duration, rtol=0.03, atol=2e-6):
+                    matches.append((start + end) * 0.5)
+                    break
+                if span > duration * 1.03 + 2e-6:
+                    break
+        return matches
+
     def get_trajectory_excitation_times(self, time: np.ndarray) -> np.ndarray:
-        """Find calibrated 90-degree RF foci that start independent TR blocks."""
+        """Find named sequence-excitation RF foci that start independent TR blocks."""
         if not hasattr(self, "detect_rf_pulse_descriptors"):
             return np.asarray([], dtype=float)
         calibrations = [
             item for item in self.__dict__.get("rfPulseCalibrations", [])
-            if abs(float(item.get("flip_angle", 0.0)) - 90.0) <= 10.0
+            if self.is_trajectory_excitation_calibration(item)
         ]
         if not calibrations:
             return np.asarray([], dtype=float)
+        pulses = self.detect_rf_pulse_descriptors()
         excitations = [
-            float(pulse["focus"])
-            for pulse in self.detect_rf_pulse_descriptors()
-            if any(
-                np.isclose(float(pulse["duration"]), float(calibration["duration"]), rtol=0.03, atol=2e-6)
-                for calibration in calibrations
-            )
+            focus
+            for calibration in calibrations
+            for focus in self.match_rf_calibration_foci(calibration, pulses)
         ]
         if not excitations:
             return np.asarray([], dtype=float)
@@ -975,12 +1022,22 @@ class CalculationMixin:
         last_time = min(float(part[-1]) for part in parts if part.size)
         end_time = min(max(end_time, start_time), last_time)
         anchor_time = getattr(self, "trajectoryZeroReferenceTime", None)
-        if anchor_time is not None and start_time <= float(anchor_time) <= end_time:
-            start_time = float(anchor_time)
+        # Search the entire trajectory for excitation resets. A manual display
+        # zero may lie after the excitation and must not hide it from the
+        # physical b-matrix integration domain.
         excitation_times = self.get_trajectory_excitation_times(np.asarray([start_time, last_time], dtype=float))
         preceding_excitations = excitation_times[excitation_times <= end_time]
         if preceding_excitations.size:
-            start_time = max(start_time, float(preceding_excitations[-1]))
+            start_time = float(preceding_excitations[-1])
+        elif excitation_times.size:
+            # Preparation gradients before the first excitation do not encode
+            # transverse magnetization and must not contribute to diffusion
+            # weighting. The b-matrix starts at the excitation RF focus.
+            return np.zeros((3, 3), dtype=float)
+        elif anchor_time is not None and start_time <= float(anchor_time) <= end_time:
+            # With no identifiable excitation, retain the manual zero as an
+            # explicit fallback integration origin.
+            start_time = float(anchor_time)
         knots = np.unique(np.concatenate([part[(part >= start_time) & (part <= end_time)] for part in parts] + [np.asarray([start_time, end_time])]))
         if knots.size < 2:
             return np.zeros((3, 3), dtype=float)
