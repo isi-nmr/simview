@@ -537,7 +537,87 @@ class InteractionMixin:
         QtGui.QShortcut(QtGui.QKeySequence("]"), self, activated=self.jump_to_next_rf_pulse)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Left), self, activated=self.jumpXNeg)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Right), self, activated=self.jumpXPos)
-        QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_F1), self, activated=self.showShortcutsHelp)
+
+    def showUserGuide(self) -> None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("SimView User Guide")
+        dialog.resize(760, 680)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        guide = QtWidgets.QTextBrowser(dialog)
+        guide.setOpenExternalLinks(True)
+        guide.setHtml(
+            """
+            <h1>SimView User Guide</h1>
+            <p>SimView displays RF, gradient, acquisition, and calculated pulse-sequence signals on a shared time axis.</p>
+
+            <h2>1. Load and inspect a sequence</h2>
+            <ol>
+              <li>Choose <b>File → Open Folder</b> and select a Bruker simulation or NMRScopeB output folder.</li>
+              <li>Use the <b>Channels</b> tab to show the signals you need. The filter searches channel names; <b>Show All</b> and <b>Hide All</b> affect the filtered list.</li>
+              <li>Move the mouse over any plot. The red cursor, timestamp, curve values, status bar, and b-matrix readout update together.</li>
+            </ol>
+
+            <h2>2. Navigate the timeline</h2>
+            <ul>
+              <li><b>Zoom + / Zoom −</b> change the visible time span. The bottom slider moves the window.</li>
+              <li><b>Previous RF / Next RF</b> jump between detected RF pulse starts.</li>
+              <li><b>Reset View</b> restores the complete time range; <b>A</b> rescales visible plots vertically.</li>
+              <li><b>Zoom Mode</b> lets you drag a time region. Mouse-wheel gestures are listed under Help → Keyboard &amp; Mouse Shortcuts.</li>
+            </ul>
+
+            <h2>3. Measure time intervals</h2>
+            <p>Enable <b>Measure</b>, click once to start and again to finish. Completed measurements appear in the
+            <b>Measurements</b> tab and can be labelled, revisited, removed, or exported. Enable
+            <b>Stick Measurements To Events</b> to snap endpoints to nearby sequence events.</p>
+
+            <h2>4. Gradient and trajectory channels</h2>
+            <ul>
+              <li><b>Gradients</b>: recorded gradient waveforms in magnet x, y, and z coordinates.</li>
+              <li><b>Gradient Trajectory</b>: the unmodified integral of each recorded gradient.</li>
+              <li><b>Effective Gradient</b>: the gradient with its sign reversed after every selected 180° refocusing pulse.</li>
+              <li><b>Effective Trajectory</b>: the integral of the effective gradient. Echo detection and the b-matrix use this trajectory.</li>
+              <li><b>Gradient Trajectory Residual</b>: the magnitude of the effective trajectory.</li>
+            </ul>
+
+            <h2>5. Define the coherence path</h2>
+            <p>Place the cursor at the desired event and use:</p>
+            <ul>
+              <li><b>T / Zero Trajectory At Cursor</b> to define the trajectory origin.</li>
+              <li><b>F / 180 Flip</b> to add a refocusing pulse at the cursor.</li>
+              <li><b>Shift+F</b> while hovering over an RF pulse to identify pulses of that duration as 180° pulses.</li>
+              <li><b>Reset Traj</b> to clear the selected origin and refocusing flips.</li>
+            </ul>
+            <p>Detected flips, trajectory resets, echoes, and acquisition windows are drawn as annotations. Detailed
+            flip management and echo results are available in the <b>Settings</b> tab.</p>
+
+            <h2>6. b-matrix at the cursor</h2>
+            <p>The panel below the channel list shows the cumulative 3×3 b-matrix at the cursor in <b>s/mm²</b>.
+            Rows and columns are in <b>magnet coordinates (x, y, z)</b>; off-diagonal entries describe interactions
+            between gradient axes. The calculation follows the effective trajectory and therefore updates when the
+            trajectory origin or 180° flips change.</p>
+            <p>A physical gradient calibration is required. Configure <b>Grad Calibration</b>, nucleus,
+            and display units in the <b>Settings</b> tab. Without calibration, the panel displays dashes.</p>
+
+            <h2>7. Export and display settings</h2>
+            <ul>
+              <li><b>File → Export Visible Plots</b> exports the currently shown plots.</li>
+              <li><b>File → Export Measurements</b> writes completed measurements to a spreadsheet.</li>
+              <li>The <b>Settings</b> tab controls theme, gradient calibration and units, derived-signal parameters,
+              gradient layout, RF refocusing assumptions, and echo tolerance.</li>
+            </ul>
+
+            <h2>Reading the display</h2>
+            <p>The status bar reports interaction mode, snap state, visible span, cursor time, active measurement,
+            number of 180° flips, effective trajectory components and magnitude, and the pulse-program location.
+            Coloured shaded regions mark acquisition jobs; dashed labelled lines mark RF foci, flips, resets, and echoes.</p>
+            """
+        )
+        guide.moveCursor(QtGui.QTextCursor.MoveOperation.Start)
+        layout.addWidget(guide)
+        close_button = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        close_button.rejected.connect(dialog.reject)
+        layout.addWidget(close_button)
+        dialog.exec()
 
     def showShortcutsHelp(self) -> None:
         help_text = (
@@ -555,7 +635,8 @@ class InteractionMixin:
             "<b>F</b> Add 180 refocus flip at cursor<br>"
             "<b>Shift+F</b> Treat hovered RF pulse as 180°<br>"
             "<b>[ / ]</b> Jump previous / next RF pulse<br>"
-            "<b>F1</b> Show this help<br><br>"
+            "<b>J</b> Jump to a pulse-program line<br>"
+            "<b>F1</b> Open the user guide<br><br>"
             "<b>Mouse controls</b><br><br>"
             "<b>Move mouse</b> Inspect synced cursor across plots<br>"
             "<b>Measure mode</b> Click once to start, click again to finish<br>"

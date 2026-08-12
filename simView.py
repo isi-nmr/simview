@@ -197,8 +197,12 @@ class GUIapp(
         self.jumpToPpgLineAction.triggered.connect(self.jump_to_ppg_line)
         viewMenu.addAction(self.jumpToPpgLineAction)
 
-        shortcutsHelpAction = QtGui.QAction("Shortcuts", self)
-        shortcutsHelpAction.setShortcut(QtGui.QKeySequence(Qt.Key.Key_F1))
+        userGuideAction = QtGui.QAction("User Guide", self)
+        userGuideAction.setShortcut(QtGui.QKeySequence(Qt.Key.Key_F1))
+        userGuideAction.triggered.connect(self.showUserGuide)
+        helpMenu.addAction(userGuideAction)
+
+        shortcutsHelpAction = QtGui.QAction("Keyboard && Mouse Shortcuts", self)
         shortcutsHelpAction.triggered.connect(self.showShortcutsHelp)
         helpMenu.addAction(shortcutsHelpAction)
 
@@ -335,6 +339,9 @@ class GUIapp(
         self.bMatrixUnitsLabel = QtWidgets.QLabel("s/mm²")
         self.bMatrixUnitsLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.bMatrixLayout.addWidget(self.bMatrixUnitsLabel, 4, 0, 1, 5)
+        self.bMatrixCoordinatesLabel = QtWidgets.QLabel("Magnet coordinates (x, y, z)")
+        self.bMatrixCoordinatesLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.bMatrixLayout.addWidget(self.bMatrixCoordinatesLabel, 5, 0, 1, 5)
 
         self.channelsLayout.addWidget(self.channelFilter)
         self.channelsLayout.addLayout(self.channelButtonLayout)
