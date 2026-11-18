@@ -199,10 +199,14 @@ def read_pulse_program_structure(
         gradient_registers = acqp_parameters.get("ACQ_gradient_amplitude", [])
         if isinstance(gradient_registers, list):
             parameters.update({f"g{index}": value for index, value in enumerate(gradient_registers)})
+    spatial_dimension = re.fullmatch(r"([123])D", str(parameters.get("PVM_SpatDimEnum", "")), re.IGNORECASE)
+    if spatial_dimension:
+        parameters.setdefault("PVM_SpatDim", int(spatial_dimension[1]))
     for symbol, parameter in (("PVM_VpTrim", "PVM_VpSpoilerStrength"), ("PVM_ChTrim", "PVM_ChSpoilerStrength")):
         values = parameters.get(parameter)
         if isinstance(values, list):
             parameters.setdefault(symbol, values)
+    delay_lists = {}
     for match in re.finditer(
         r'^(Delay|Loopcounter) list "(\w+)"[^\n]*:\s*(\d+) items?\s*\n=+\n([^\n]*(?:\n[ \t]+[^\n]+)*)',
         text, re.MULTILINE,
@@ -213,6 +217,7 @@ def read_pulse_program_structure(
             continue
         if kind == "Delay":
             parameters[name] = values
+            delay_lists[name.casefold()] = values
         elif len(values) == 1 and values[0].is_integer():
             loop_values[name] = int(values[0])
     gradient_ramps: list[list[float]] = []
@@ -223,6 +228,7 @@ def read_pulse_program_structure(
         gradient_output = ""
     gcon_sections = _gcon_sections(gradient_output)
     gradient_function = _gcon_gradient_function(gcon_sections)
+    ramped_targets, sampled_gradients = _read_gcon_gradient_points(gradient_output, gcon_sections, gradient_function)
     ramp_matches = list(re.finditer(
         r"^ramp\s+(\d+):\s+(\d+)\s+items\s*\n-+\s*\n(.*?)(?=\n\s*(?:ramp\s+\d+:|pulse increments|\Z))",
         gradient_output, re.MULTILINE | re.DOTALL,
@@ -258,16 +264,26 @@ def read_pulse_program_structure(
     }
     return {
         "source": main_source, "records": records, "loop_values": loop_values,
-        "delay_names": [name for name, _ in named_delays],
+        "delay_names": [name for name, _ in named_delays] + list(delay_lists),
+        "compiled_delay_lists": delay_lists,
         "compiled_delays": compiled_delays, "compiled_lines": compiled_lines,
         "parameters": parameters, "output": str(output_path),
         "precomp": str(precomp_path) if precomp_path is not None else None,
         "rf_shapes": _read_compiled_rf_shapes(text),
+        "rf_shape_list_instructions": _read_compiled_rf_shape_list_instructions(text),
         "rf_phase_lists": _read_compiled_phase_lists(text),
+        "rf_phase_aliases": {
+            name.casefold(): f"ph{register}" for name, register in re.findall(
+                r'^Phase list "(\w+)"[^\n]*:\s*1 item\s*\n=+\s*\n[ \t]*(\d+)[ \t]*$',
+                text, re.MULTILINE,
+            )
+        },
         "frequency_lists_hz": _read_compiled_frequency_lists(text),
+        "adc_gate_durations": _read_compiled_dwell_times(text),
         "gradient_ramps": gradient_ramps,
         "gradient_vectors": _read_shaped_gradient_vectors(gcon_sections, gradient_function),
-        "ramped_gradient_targets": _read_ramped_gradient_targets(gradient_output, gcon_sections, gradient_function),
+        "ramped_gradient_targets": ramped_targets,
+        "sampled_gradient_points": sampled_gradients,
         "recorded_gradient_profiles": read_schematic_gradient_profiles(
             local_path / "_GCube.xml", gradient_commands,
             expected_samples=max((len(ramp) - 1 for ramp in gradient_ramps), default=0),
@@ -283,6 +299,25 @@ def read_pulse_program_structure(
 
 
 _GCON_NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?"
+
+
+def _read_compiled_dwell_times(output: str) -> dict[str, float]:
+    """Resolve compiled CPD pointers to their sampling gates."""
+    pointers = re.split(r"^[ \t]*\[(\d+)\]:[^\n]*\n", output, flags=re.MULTILINE)
+    durations = {}
+    for pointer, block in zip(pointers[1::2], pointers[2::2], strict=True):
+        if not re.search(r"^[ \t]*cpd program:[ \t]+DWELL-PROGRAM\b", block, re.MULTILINE):
+            continue
+        gates = re.findall(rf"fixdel\(({_GCON_NUMBER}) usec\)[^\n]*\bset=Dwen[AB]\b", block)
+        if len(gates) == 1:
+            durations[pointer] = float(gates[0]) * 1e-6
+    candidates: dict[str, set[float]] = {}
+    for delay, pointer in re.findall(
+        r"^[ \t]*(\w+)\s+deccmd[^\n]*\bCPDSNG\b[^\n]*\bvia ptr (\d+)\b", output, re.MULTILINE,
+    ):
+        if pointer in durations:
+            candidates.setdefault(delay.casefold(), set()).add(durations[pointer])
+    return {delay: next(iter(values)) for delay, values in candidates.items() if len(values) == 1}
 
 
 def _read_compiled_frequency_lists(output: str) -> dict[str, np.ndarray]:
@@ -375,12 +410,33 @@ def _read_compiled_rf_shapes(output: str) -> dict[tuple[str, int], list[dict[str
             shape["offset_hz"] = hz
         if shape_list is not None:
             shape["shape_list"] = shape_list
+            shape["shape_index"] = int(re.search(r"\[(\d+)\]", header[0])[1])
+        power = re.search(rf"\bpower\s*=\s*({_GCON_NUMBER})\s*W\b", block.partition("\n")[0])
+        if power is not None:
+            shape["power_watts"] = float(power[1])
         pointer = re.search(r"\bpoino[ \t]*=[ \t]*(\d+)\b", block, re.IGNORECASE)
         channel = power_channels.get((int(pointer[1]), nco)) if pointer is not None else None
         if channel is not None:
             shape["channel"] = channel
         shapes.setdefault((header[2].lower(), nco), []).append(shape)
     return shapes
+
+
+def _read_compiled_rf_shape_list_instructions(output: str) -> dict[int, int]:
+    """Bind shape-list pointers to the source pulse that emitted the instruction."""
+    blocks = re.split(r"^[ \t]*(\d+)[ \t]+\"'[^\n]+?': line \d+--->", output, flags=re.MULTILINE)
+    instructions = {}
+    for line, block in zip(blocks[1::2], blocks[2::2], strict=True):
+        source, _, emitted = block.partition("\n")
+        pulse = re.search(r"\(\s*(\w+)\s*:", source)
+        if pulse:
+            pointer = re.search(
+                rf"^[ \t]*{re.escape(pulse[1])}\s+Shape Pulse[^\n]*\bshape pulse from list via ptr (\d+)\b",
+                emitted, re.MULTILINE | re.IGNORECASE,
+            )
+            if pointer:
+                instructions[int(line)] = int(pointer[1])
+    return instructions
 
 
 def _read_compiled_phase_lists(output: str) -> dict[tuple[str, int], np.ndarray]:
@@ -404,7 +460,7 @@ def _gcon_sections(output: str) -> dict[str, str]:
     return {name.strip(): body for name, body in zip(parts[1::2], parts[2::2], strict=True)}
 
 
-def _gcon_gradient_function(sections: dict[str, str]) -> Callable[[int], np.ndarray | None]:
+def _gcon_gradient_function(sections: dict[str, str]) -> Callable[..., np.ndarray | None]:
     """Resolve a point's function relation, including chained multiplicative modifiers."""
     shapes = {}
     shape_section = sections.get("Gradient Shape Values", "")
@@ -424,8 +480,8 @@ def _gcon_gradient_function(sections: dict[str, str]) -> Callable[[int], np.ndar
         )
     }
     @cache
-    def function_values(index: int) -> np.ndarray | None:
-        values = np.ones(1)
+    def function_values(index: int, sample_count: int | None = None) -> np.ndarray | None:
+        values = np.ones((1, 1)) if sample_count else np.ones(1)
         visited = set()
         while index >= 0:
             if index not in relations or index in visited:
@@ -433,7 +489,15 @@ def _gcon_gradient_function(sections: dict[str, str]) -> Callable[[int], np.ndar
             visited.add(index)
             shape, scale, index = relations[index]
             samples = shapes.get(shape)
-            if samples is None or (values.size != 1 and samples.size not in {1, values.size}):
+            if samples is None:
+                return None
+            if sample_count:
+                # Modifiers with a different length select encodes, while
+                # waveform samples run along the time axis.
+                samples = samples[:, None] if samples.size not in {1, sample_count} else samples[None, :]
+                if values.shape[0] != 1 and samples.shape[0] not in {1, values.shape[0]}:
+                    return None
+            elif values.size != 1 and samples.size not in {1, values.size}:
                 return None
             values = values * (scale * samples)
         return values if np.isfinite(values).all() else None
@@ -484,47 +548,62 @@ def _read_shaped_gradient_vectors(
     return vectors
 
 
-def _read_ramped_gradient_targets(
-    output: str, sections: dict[str, str], function_values: Callable[[int], np.ndarray | None],
-) -> list[tuple[np.ndarray, ...] | None]:
-    """Decode physical XYZ targets and any target lists from the first slice."""
+def _read_gcon_gradient_points(
+    output: str, sections: dict[str, str], function_values: Callable[..., np.ndarray | None],
+) -> tuple[list[tuple[np.ndarray, ...] | None], dict[int, np.ndarray]]:
+    """Decode ramp targets and sampled shapes from the first slice of the XYZ point table."""
     header = re.search(r"\bn_gpoints\s*=\s*(\d+)[^\n]*\bn_slices\s*=\s*(\d+)", output)
     axes = re.search(r"\bdigsgradchanmap\s*=\s*0,\s*1,\s*2\b", output)
     section = sections.get("Gradient Points")
     if header is None or axes is None or section is None:
-        return []
+        return [], {}
     point_count, slice_count = map(int, header.groups())
     if not point_count or not slice_count:
-        return []
+        return [], {}
 
     rows = re.findall(
         rf"^[ \t]*(\w+)\s+({_GCON_NUMBER}),\s*(\d+)\s+(\d+):\s+"
-        rf"({_GCON_NUMBER})\s+(\d+)\s+(\d+)\s+\d+\s+(\d+)[ \t]*$",
+        rf"({_GCON_NUMBER})\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)[ \t]*$",
         section, re.MULTILINE,
     )
     axis_stride = point_count * slice_count
     if len(rows) != 3 * axis_stride:
-        return []
+        return [], {}
 
-    def axis_values(row: tuple[str, ...]) -> np.ndarray | None:
-        kind, delay, delay_index, count, base, first, functions, sample_functions = row
-        if kind != "Ramped" or float(delay) != 0 or delay_index != "0" or count != "1" or sample_functions != "0":
+    def axis_values(row: tuple[str, ...], sample_count: int | None) -> np.ndarray | None:
+        kind, delay, delay_index, count, base, first, functions, first_sample, sample_functions = row
+        if float(delay) != 0 or delay_index != "0":
             return None
-        values = np.array([float(base)])
-        for index in range(int(first), int(first) + int(functions)):
-            samples = function_values(index)
-            if samples is None or (values.size != 1 and samples.size not in {1, values.size}):
+        if sample_count is None:
+            if kind != "Ramped" or count != "1" or sample_functions != "0":
                 return None
-            values = values + samples
+        elif kind != "Shaped" or int(count) != sample_count:
+            return None
+        values = np.full((1, sample_count), float(base)) if sample_count else np.array([float(base)])
+        for start, length in ((first, functions), (first_sample, sample_functions)):
+            for index in range(int(start), int(start) + int(length)):
+                samples = function_values(index, sample_count)
+                if samples is None or (values.shape[0] != 1 and samples.shape[0] not in {1, values.shape[0]}):
+                    return None
+                values = values + samples
         if not np.isfinite(values).all():
             return None
-        return values[:1] if np.all(values == values[0]) else values
+        return values[:1] if sample_count is None and np.all(values == values[0]) else values
 
     targets = []
+    sampled = {}
     for point in range(point_count):
-        values = tuple(axis_values(rows[axis * axis_stride + point]) for axis in range(3))
-        targets.append(values if all(value is not None for value in values) else None)
-    return targets
+        xyz = [rows[axis * axis_stride + point] for axis in range(3)]
+        sample_count = int(xyz[0][3]) if xyz[0][0] == "Shaped" else None
+        values = tuple(axis_values(row, sample_count) for row in xyz)
+        complete = all(value is not None for value in values)
+        targets.append(values if complete and sample_count is None else None)
+        if complete and sample_count:
+            variants = {value.shape[0] for value in values if value.shape[0] > 1}
+            if len(variants) <= 1:
+                waveform = np.stack(np.broadcast_arrays(*values)) * 100.0
+                sampled[point] = waveform[:, 0] if waveform.shape[1] == 1 else waveform
+    return targets, sampled
 
 
 def build_compiled_epi_waveform(

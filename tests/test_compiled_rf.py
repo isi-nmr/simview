@@ -40,6 +40,9 @@ shape list [5]:
        amplitudes: 2 items
        ----------------------
        8 2
+1094 "'demo.ppg': line 180--->   (p1: rfc_pulse rfc_phase):f2"
+
+p1 Shape Pulse SP50:f2 deccmd f2: shape pulse from list via ptr 5 phase(0,0)
 """
     )
 
@@ -54,6 +57,10 @@ shape list [5]:
     np.testing.assert_allclose(variants[1]["amplitude"], [1, 0.25])
     assert variants[1]["phase"] is None
     assert variants[0]["offset_hz"] == pytest.approx(-1250)
+    listed = compiled_rf_shape({"internal_line": 1094, "rf_shape": "rfc_pulse", "rf_channel": 2}, structure)
+    assert listed is not None and listed[0] == 3
+    assert listed[1]["shape_list"] == 5
+    assert listed[1]["schedule_size"] == 1
 
 
 def test_compiled_rf_phase_lists_use_their_own_nco_and_angle_units(tmp_path: Path) -> None:

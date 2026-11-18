@@ -115,6 +115,30 @@ def test_full_ppg_draws_nested_loop_counts_above_waveforms(qapp: QtWidgets.QAppl
     assert labels["Repetitions ×3"] - labels["slices ×1"] >= 0.55
 
 
+def test_full_ppg_uses_caption_for_expanded_epi_loop(qapp: QtWidgets.QApplication) -> None:
+    gui = GUIapp.__new__(GUIapp)
+    gui.pulseProgramStructure = {
+        "records": [{"source": "epi.mod", "line": i, "text": code} for i, code in enumerate([
+            "start, (rde1 de1 adc_job0 ph0 syrec_job0) (1u 1u ph1:r):f_job0",
+            "0u gc_control", "{", "EpiD4 grad_shape <xyzb0> {a}",
+            "loop PVM_EpiEchoCounter", "{", "EpiD5 grad_shape <xyzb0> {b}", "}", "}",
+            "EpiD2 dwgen_job0", "EpiD0 eoscnpzbwrif_job0", "lo to start times NR",
+        ])],
+        "gradient_vectors": [np.zeros((3, 2)), np.zeros((3, 2))],
+        "parameters": {
+            "PVM_EpiEchoCounter": 32, "NR": 3, "PVM_EpiGradDwellTime": 1.0, "PVM_EpiPlateau": .004,
+            "PVM_EpiModuleTime": .1, "EpiD0": 1e-6, "EpiD1": 3e-6, "EpiD2": 75e-6, "EpiD3": 1e-6,
+        },
+    }
+    plot = pg.PlotWidget()
+    gui.render_full_ppg_schematic(plot)
+    labels = [item.toPlainText() for item in plot.items() if isinstance(item, pg.TextItem)]
+    assert "EPI readout · 100 µs · 32 echo pairs" in labels
+    brackets = [curve.toolTip() for curve in plot.listDataItems() if "Count expression:" in curve.toolTip()]
+    assert len(brackets) == 1 and "Count expression: NR" in brackets[0]
+    plot.close()
+
+
 @pytest.mark.parametrize("source", ["MGE.ppg", "RARE.ppg", "custom.ppg"])
 def test_full_ppg_labels_echo_loops_consistently(qapp: QtWidgets.QApplication, source: str) -> None:
     gui = GUIapp.__new__(GUIapp)
@@ -427,6 +451,152 @@ def test_full_ppg_follows_gcon_function_and_modifier_references(
     plot.close()
 
 
+def test_full_ppg_decodes_sampled_gradient_points_and_their_adc_window(
+    qapp: QtWidgets.QApplication, tmp_path: Path,
+) -> None:
+    from utils.simUtilsBrkr import read_pulse_program_structure
+
+    (tmp_path / "method").write_text("##$PVM_SpatDimEnum=<2D>\n")
+    (tmp_path / "acqp").touch()
+    (tmp_path / "pulseprogram.precomp").write_text(
+        'define delay SpirD0 = 12u\ndefine list<grad_shape> a={$GradShape}\n# 101 "Spiral.mod"\n'
+        "SpirD0 dwgen_job0 grad_shape <xyzb0> {a(), b(), 0, 0}\n"
+        "if (PVM_SpatDim == 3) {\n144u grad_ramp{0, 0, unknown}\n}\n"
+    )
+    (tmp_path / "_FCube1.output").write_text(
+        " [9]: CPD for f1 on NCO1:\n cpd program: DWELL-PROGRAM\n"
+        " fixdel(10.000000 usec) fcubeRtps[0]: set=DwenA, clr=none\n"
+        " SpirD0 deccmd f1: CPDSNG prog 16 (CPDPRG17) via ptr 9 NEXTGRAD\n"
+    )
+    (tmp_path / "_GCube.output").write_text(
+        " n_gpoints = 1, n_gvecp = 0, n_gvec = 0, n_slices = 1\n"
+        " digsgradchanmap = 0, 1, 2, 3\n"
+        "Gcon: Gradient Points\n----\n"
+        "Shaped 0.000, 0 3: 0 0 0 0 1\n"
+        "Shaped 0.000, 0 3: 0 0 0 1 1\n"
+        "Shaped 0.000, 0 3: 0 0 0 2 0\n"
+        "Gcon: Gradient Points to Function Relation\n----\n"
+        " 0: 1 1 0.5 -1\n 1: 2 2 -0.25 -1\n"
+        "Gcon: Gradient Shape Values\n----\n"
+        "shape 1: 3 items\n----\n0.2 -0.4 0\n"
+        "shape 2: 3 items\n----\n0 0.8 0\n"
+    )
+    gui = GUIapp.__new__(GUIapp)
+    gui.pulseProgramStructure = read_pulse_program_structure(str(tmp_path), "demo.ppg", include_recorded_gradients=False)
+    plot = pg.PlotWidget()
+    gui.render_full_ppg_schematic(plot)
+
+    curves = plot.listDataItems()
+    gradient = next(curve for curve in curves if curve.toolTip().startswith("Gx compiled gradient"))
+    assert gradient.opts["stepMode"] == "right"
+    np.testing.assert_allclose(gradient.getData()[1], 3 + .42 * np.array([.1, -.2, 0, 0]))
+    adc = next(curve for curve in curves if curve.toolTip() == "ADC · 10 µs")
+    assert np.ptp(adc.getData()[0]) == pytest.approx(.2)
+    assert not any("unknown" in curve.toolTip() for curve in curves)
+    plot.close()
+
+
+def test_full_ppg_decodes_a_sampled_shape_with_a_phase_encoding_list(
+    qapp: QtWidgets.QApplication, tmp_path: Path,
+) -> None:
+    from utils.simUtilsBrkr import read_pulse_program_structure
+
+    (tmp_path / "pulseprogram.precomp").write_text(
+        "vd1 grad_off\n6u grad_shape{0, shape()*phase, 0}\ngrad_ramp{0, 0, 20}\n144u\n"
+    )
+    (tmp_path / "_FCube1.output").write_text('Delay list "vd1" -- : 1 item\n====\n0.005\n')
+    (tmp_path / "_GCube.output").write_text(
+        " n_gpoints = 3, n_slices = 1\n digsgradchanmap = 0, 1, 2, 3\n"
+        "Gcon: Gradient Points\n----\n"
+        + "".join("Ramped 0, 0 1: 0 0 0 0 0\n" f"Shaped 0, 0 3: 0 0 0 0 {int(axis == 1)}\n"
+                  "Ramped 0, 0 1: 0 0 0 0 0\n" for axis in range(3))
+        + "Gcon: Gradient Points to Function Relation\n----\n0: 1 1 1 1\n1: 2 2 1 -1\n"
+        "Gcon: Gradient Shape Values\n----\nshape 1: 3 items\n----\n0 0.5 0\n"
+        "shape 2: 2 items\n----\n-1 1\n"
+        "Gcon: Ramp Shape Values\n----\n" + "".join(f"ramp {axis}: 1 items\n----\n0.5\n" for axis in range(3))
+    )
+    gui = GUIapp.__new__(GUIapp)
+    gui.pulseProgramStructure = read_pulse_program_structure(str(tmp_path), "demo.ppg", include_recorded_gradients=False)
+    plot = pg.PlotWidget()
+    gui.render_full_ppg_schematic(plot)
+    traces = [curve for curve in plot.listDataItems() if curve.toolTip().startswith("Gy compiled gradient")]
+    assert len(traces) == 2
+    np.testing.assert_allclose(sorted(curve.getData()[1][1] for curve in traces), [2 - .21, 2 + .21])
+    assert any(isinstance(item, pg.TextItem) and item.toPlainText() == "vd1 · 5 ms" for item in plot.items())
+    ramp = next(curve for curve in plot.listDataItems() if curve.toolTip().startswith("Gz PPG expression: 20"))
+    assert ramp.opts["pen"].style() == QtCore.Qt.PenStyle.SolidLine
+    assert np.ptp(ramp.getData()[0]) > 0
+    plot.close()
+
+
+@pytest.mark.parametrize("slice_alter", ["No", "Yes"])
+def test_full_ppg_uses_only_active_slice_polarities(slice_alter: str) -> None:
+    gui = GUIapp.__new__(GUIapp)
+    program = [
+        "slice, 10u grad_shape{0,0,shape()*plusminus}",
+        "10u grad_ramp{g6,0,g5*plusminus}",
+        "10u grad_shape{readout()*projection,0,shape()*plusminus}",
+        "if(SliceAlter == Yes) {",
+        "0u plusminus.inc",
+        "lo to slice times 2",
+        "}",
+    ]
+    shaped = np.zeros((3, 2, 3))
+    shaped[2, :, 1] = [-20, 20]
+    mixed = shaped.copy()
+    mixed[0, :, 1] = [-10, 10]
+    ramped = (np.array([.2]), np.array([0.]), np.array([.3, -.3]))
+    gui.pulseProgramStructure = {
+        "records": [{"source": "demo.ppg", "line": i, "text": code} for i, code in enumerate(program)],
+        "parameters": {"SliceAlter": slice_alter},
+        "ramped_gradient_targets": [None, ramped, None],
+        "sampled_gradient_points": {0: shaped, 2: mixed},
+    }
+
+    events = gui.build_full_ppg_schematic_events()
+    shapes, ramp, projections = [event for event in events if event["kind"] == "gradient"]
+    assert any(event["kind"] == "loop" for event in events) == (slice_alter == "Yes")
+    if slice_alter == "Yes":
+        np.testing.assert_array_equal(shapes["compiled_gradient_samples"], shaped)
+        np.testing.assert_array_equal(ramp["compiled_ramped_target"][2], [.3, -.3])
+        np.testing.assert_array_equal(projections["compiled_gradient_samples"], mixed)
+    else:
+        np.testing.assert_array_equal(shapes["compiled_gradient_samples"], shaped[:, 0])
+        np.testing.assert_array_equal(ramp["compiled_ramped_target"][2], [.3])
+        np.testing.assert_array_equal(projections["compiled_gradient_samples"][0], mixed[0])
+        np.testing.assert_array_equal(projections["compiled_gradient_samples"][2, :, 1], [-20, -20])
+        assert shaped[2, 1, 1] == mixed[2, 1, 1] == 20
+
+
+def test_full_ppg_keeps_parallel_gradients_on_the_rf_and_adc_timeline(qapp: QtWidgets.QApplication) -> None:
+    gui = GUIapp.__new__(GUIapp)
+    gui.channels = []
+    gui.rfPulseCalibrations = []
+    program = [
+        "10u gc_control", "{", "100u grad_shape{a(),0,0}", "}",
+        "20u", "(p0 ph0):f1", "d7 dwgen_job0", "aq_job0", "1m",
+    ]
+    gui.pulseProgramStructure = {
+        "records": [{"source": "demo.ppg", "line": i, "text": code} for i, code in enumerate(program)],
+        "parameters": {"p0": 20e-6, "d7": 10e-6, "PVM_AcquisitionTime": .06},
+        "ramped_gradient_targets": [None],
+        "sampled_gradient_points": {0: np.array([[0, 20, 0], [0, 0, 0], [0, 0, 0]])},
+        "adc_gate_durations": {"d7": 50e-6},
+    }
+    plot = pg.PlotWidget()
+    gui.render_full_ppg_schematic(plot, delay_scale="proportional")
+
+    curves = plot.listDataItems()
+    gradient = next(c for c in curves if c.toolTip().startswith("Gx compiled gradient"))
+    rf = next(c for c in curves if c.toolTip().startswith("PPG RF pulse: p0"))
+    adc, = [c for c in curves if c.toolTip().startswith("ADC ·")]
+    np.testing.assert_allclose(gradient.getData()[0][[0, -1]], [0, 2])
+    np.testing.assert_allclose(rf.getData()[0][[0, -1]], [.6, 1])
+    np.testing.assert_allclose(adc.getData()[0], [1, 2])
+    assert adc.toolTip() == "ADC · 50 µs"
+    plot.close()
+
+
 def test_full_ppg_marks_placeholder_waveforms(qapp: QtWidgets.QApplication) -> None:
     gui = GUIapp.__new__(GUIapp)
     gui.channels = []
@@ -674,15 +844,35 @@ def test_full_ppg_channel_controls_combine_and_hide_traces(
             if " PPG expression:" in item.toolTip()
         }
 
+    def excursions():
+        return {
+            axis: max(
+                np.max(np.abs(item.getData()[1] - baseline))
+                for item in plot.listDataItems() if item.toolTip().startswith(f"{axis} PPG expression:")
+            )
+            for axis, baseline in baselines().items()
+        }
+
     try:
         assert baselines() == {"Gx": 3.0, "Gy": 2.0, "Gz": 1.0}
         controls = {button.text(): button for button in dialog.findChildren(QtWidgets.QCheckBox)}
+        assert controls["Autoscale gradients"].isChecked()
+        np.testing.assert_allclose(list(excursions().values()), [.42, .42, .42])
+        legend = dialog.findChild(QtWidgets.QWidget, "schematicLegend")
+        legend_labels = {label.text(): label for label in legend.findChildren(QtWidgets.QLabel) if label.text()}
+        assert {"RF", "RF phase", "Gx", "Gy", "Gz", "ADC", "Frequency offset", "Placeholder"} <= legend_labels.keys()
+        assert legend_labels["Gy"].isVisible()
         plot.setXRange(.4, 1.8, padding=0)
         controls["Combine gradients"].click()
         assert len(set(baselines().values())) == 1
+        np.testing.assert_allclose([excursions()[axis] for axis in ("Gx", "Gy", "Gz")], [.42, .21, .315])
+        controls["Autoscale gradients"].click()
+        np.testing.assert_allclose([excursions()[axis] for axis in ("Gx", "Gy", "Gz")], [.084, .042, .063])
         np.testing.assert_allclose(plot.viewRange()[0], [.4, 1.8])
         controls["Gy"].click()
         assert set(baselines()) == {"Gx", "Gz"}
+        assert not legend_labels["Gy"].isVisible()
+        assert legend_labels["Gx"].isVisible() and legend_labels["Gz"].isVisible()
         controls["RF"].click()
         controls["ADC"].click()
         tooltips = [item.toolTip() for item in plot.listDataItems()]

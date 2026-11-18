@@ -36,15 +36,30 @@ def compiled_rf_shape(event: dict, structure: dict) -> tuple[int, dict] | None:
     """Find a unique registered RF shape for a program instruction."""
     shape_name = event.get("rf_shape")
     channel = event.get("rf_channel")
+    list_pointer = structure.get("rf_shape_list_instructions", {}).get(event.get("internal_line"))
     candidates = [
         (nco, variant)
         for (name, nco), variants in structure.get("rf_shapes", {}).items()
-        if name == shape_name
         for variant in variants
-        if variant.get("channel") in (None, channel)
+        if (name == shape_name if list_pointer is None else variant.get("shape_list") == list_pointer)
+        and variant.get("channel") in (None, channel)
     ]
     matching_channel = [(nco, shape) for nco, shape in candidates if shape.get("channel", nco) == channel]
     candidates = matching_channel or candidates
+    if list_pointer is not None:
+        first = [(nco, shape) for nco, shape in candidates if shape.get("shape_index") == 0]
+        if len(first) != 1 or len({nco for nco, _ in candidates}) != 1:
+            return None
+        nco, shape = first[0]
+        schedule = {**shape, "schedule_size": len(candidates)}
+        powers = [entry["power_watts"] for _, entry in candidates if "power_watts" in entry]
+        if len(powers) == len(candidates):
+            schedule["power_range_watts"] = min(powers), max(powers)
+        return nco, schedule
+    # Named shape instructions address the single registry entry, even if a
+    # separate schedule uses the same hardware shape name and duration.
+    first_entries = [candidate for candidate in candidates if candidate[1].get("shape_index", 0) == 0]
+    candidates = first_entries or candidates
     duration = event.get("duration")
     if len(candidates) > 1 and isinstance(duration, (int, float)):
         candidates = [

@@ -73,9 +73,17 @@ def test_compiled_epi_builds_the_gradient_train_without_xml(tmp_path: Path) -> N
     gui = InteractionMixin()
     gui.pulseProgramStructure = structure
     structure["records"] = [
-        {"source": "epi.mod", "line": index, "text": line} for index, line in enumerate(lines)
+        {"source": "DwiHead.mod", "line": 165, "text": "144u grad_ramp{100*DwGR1,0,0}"},
+        *({"source": "epi.mod", "line": index, "text": line} for index, line in enumerate(lines)),
+        {"source": "DwiHead.mod", "line": 194, "text": "144u grad_ramp{100*DwGR2,0,0}"},
     ]
-    readout, loop = gui.build_full_ppg_schematic_events()
+    zero = np.array([0.0])
+    structure["ramped_gradient_targets"] = [
+        (np.array([.15]), zero, zero), None, None, None, None, (np.array([-.2]), zero, zero),
+    ]
+    before, readout, loop, after = gui.build_full_ppg_schematic_events()
+    np.testing.assert_array_equal(before["compiled_ramped_target"][0], [.15])
+    np.testing.assert_array_equal(after["compiled_ramped_target"][0], [-.2])
     assert readout["kind"] == "epi_readout" and loop["kind"] == "loop"
     assert loop["expanded"] and loop["count"] == 2
     np.testing.assert_array_equal(readout["gradient_values"], waveform["gradient_values"])
