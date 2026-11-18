@@ -287,7 +287,7 @@ class CalculationMixin:
         )
         if any(term in name for term in preparation_terms):
             return False
-        return "excpul" in name or "excitationpul" in name
+        return name == "voxpul1" or "excpul" in name or "excitationpul" in name
 
     def match_rf_calibration_foci(self, calibration: dict, pulses: list[dict]) -> list[float]:
         """Match one calibration to single- or multi-lobe detected RF pulses."""

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import numpy as np
 from PyQt6 import QtWidgets
@@ -6,9 +7,14 @@ from PyQt6.QtCore import QCoreApplication, QObject, QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
 from utils import multiplot
-from utils.simUtilsBrkr import parseBrkrChannels
+from utils.simUtilsBrkr import parseBrkrChannels, read_origin_rf_pulse_calibrations, read_pulse_program_structure
 from utils.simUtilsNMRScopeB import readNMRScopeBChannels
 from widgets.mulitPlotCursor import CursorPlot
+
+
+def _bruker_simulation_path(path: str) -> str:
+    nested = Path(path) / "mrScanSim"
+    return str(nested) if nested.is_dir() else path
 
 
 class BrukerLoadWorker(QObject):
@@ -180,6 +186,7 @@ class DataLoadingMixin:
         self.channels = split_channels
 
     def resetApp(self) -> None:
+        self.close_sequence_schematic()
         if self.plotContainers:
             for container in self.plotContainers:
                 self.imageLayout.removeWidget(container)
@@ -210,6 +217,17 @@ class DataLoadingMixin:
         if hasattr(self, "nextRfPulseAction"):
             self.nextRfPulseAction.setEnabled(False)
 
+    def open_compiled_ppg(self, path: str) -> bool:
+        path = _bruker_simulation_path(path)
+        structure = read_pulse_program_structure(path, None, include_recorded_gradients=False)
+        if not structure.get("records"):
+            return False
+        self.dataPath = path
+        self.pulseProgramStructure = structure
+        self.originAcquisitionPath, self.rfPulseCalibrations = read_origin_rf_pulse_calibrations(path)
+        self.show_sequence_schematic()
+        return True
+
     def loadData(self, data: str | None = None) -> None:
         self._loadRequestId = getattr(self, "_loadRequestId", 0) + 1
         load_id = self._loadRequestId
@@ -229,8 +247,7 @@ class DataLoadingMixin:
             if os.path.exists(self.dataPath + "/" + "pulse_seq.json"):
                 self.channels = readNMRScopeBChannels(self.dataPath, progress, self)
             else:
-                if os.path.exists(self.dataPath + "/mrScanSim"):
-                    self.dataPath = self.dataPath + "/mrScanSim"
+                self.dataPath = _bruker_simulation_path(self.dataPath)
                 self._start_bruker_load(path=self.dataPath, progress=progress, load_id=load_id)
                 return
         else:

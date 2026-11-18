@@ -381,6 +381,20 @@ def test_multi_lobe_excitation_is_matched_as_one_calibrated_pulse(app_logic: GUI
     np.testing.assert_allclose(reset_times, np.array([2.35]))
 
 
+def test_press_voxel_excitation_is_a_cycle_boundary(app_logic: GUIapp) -> None:
+    app_logic.rfPulseCalibrations = [
+        {"name": "PVM_VpPul1", "duration": 0.0216, "flip_angle": 90.0},
+        {"name": "VoxPul1", "duration": 0.000778, "flip_angle": 90.0},
+    ]
+    app_logic.detect_rf_pulse_descriptors = lambda: [
+        {"focus": 0.1, "duration": 0.0216},
+        {"focus": 0.65, "duration": 0.000778},
+        {"focus": 3.15, "duration": 0.000778},
+    ]
+
+    np.testing.assert_allclose(app_logic.get_trajectory_excitation_times(np.array([0.0, 4.0])), [0.65, 3.15])
+
+
 def test_coherence_order_toggles_at_flips_relative_to_selected_zero(app_logic: GUIapp) -> None:
     app_logic.trajectoryZeroReferenceTime = 1.0
     app_logic.trajectoryRefocusTimes = [0.5, 2.0]
@@ -573,6 +587,22 @@ def test_extract_sample_acquisition_windows_accepts_bruker_11000001_end_line() -
     ]}]
 
     assert extract_sample_acquisition_windows(event_infos) == {"3": [(10.0, 11.0)]}
+
+
+def test_epi_sample_window_ends_at_dwell_completion() -> None:
+    events = [
+        {"t": 0.9, "nco": "3", "ln": "1038"},
+        {"t": 1.0, "nco": "3", "ln": "9000000", "rgp": "0--0x1"},
+        {"t": 1.000001, "nco": "3", "ln": "9000000", "rgp": "0--0"},
+        {"t": 1.0192, "nco": "3", "ln": "9000001"},
+        {"t": 1.019702, "nco": "0", "ln": "1107", "wr": "0"},
+    ]
+    info = {"events": events}
+    annotate_fcube_event_jobs(info, {"1038": "0", "1107": "0"})
+
+    assert extract_sample_acquisition_windows([info]) == {"3": [(1.0, 1.0192)]}
+    details = extract_sample_acquisition_window_details([info])
+    assert [(item["start"], item["end"]) for item in details] == [(1.0, 1.0192)]
 
 
 def test_sample_acquisition_window_details_retains_job_type() -> None:
@@ -886,6 +916,21 @@ def test_output_structure_reads_precalculated_gradient_ramps(tmp_path: Path) -> 
     assert structure["gradient_ramp_time_source"] == "Gcon raster fallback"
 
 
+def test_pulse_program_structure_uses_local_companion_files(tmp_path: Path) -> None:
+    (tmp_path / "_FCube1.output").write_text("pulse program: /missing/pulseprogram.precomp\n")
+    (tmp_path / "pulseprogram.precomp").write_text('# 12 "epi.ppg"\nlo to start times NR\n')
+    (tmp_path / "method").write_text("##$PVM_EpiEchoCounter=30\n")
+    (tmp_path / "acqp").write_text("##$NR=4\n##$D=( 2 )\n0.8 0.000144\n")
+
+    structure = read_pulse_program_structure(str(tmp_path), "epi.ppg")
+
+    assert structure["records"][0]["text"] == "lo to start times NR"
+    assert structure["parameters"]["NR"] == 4
+    assert structure["parameters"]["PVM_EpiEchoCounter"] == 30
+    assert structure["parameters"]["d0"] == pytest.approx(0.8)
+    assert structure["parameters"]["d1"] == pytest.approx(144e-6)
+
+
 def test_full_ppg_uses_method_loop_counts_and_omits_subroutine_calls(app_logic: GUIapp) -> None:
     app_logic.pulseProgramStructure = {
         "records": [
@@ -904,6 +949,85 @@ def test_full_ppg_uses_method_loop_counts_and_omits_subroutine_calls(app_logic: 
     assert next(event for event in events if event["kind"] == "loop")["count"] == 8
 
 
+def test_full_ppg_resolves_nested_loop_spans_without_xml(app_logic: GUIapp) -> None:
+    source = [
+        "define loopcounter c_echo2 = {$PVM_NEchoImages}",
+        "start, 10u",
+        "slice, subr UpdateDynPars",
+        '"c_echo = c_echo2"',
+        "nel, 10u",
+        "loop EpiEchoPairs",
+        "{",
+        "10u grad_ramp{1, 0, 0}",
+        "}",
+        'if "c_echo < 2" goto goOn',
+        '"c_echo = c_echo - 1"',
+        "goto nel",
+        "goOn, 10u",
+        "lo to slice times NSLICES",
+        "lo to start times NR",
+    ]
+    app_logic.pulseProgramStructure = {
+        "records": [{"source": "demo.ppg", "line": i, "text": text} for i, text in enumerate(source)],
+        "parameters": {"PVM_NEchoImages": 4, "EpiEchoPairs": 30, "NSLICES": 1, "NR": 2},
+    }
+    app_logic.pulseProgramTimeline = (np.array([]), np.array([]))
+
+    events = app_logic.build_full_ppg_schematic_events()
+    loops = [event for event in events if event["kind"] == "loop"]
+
+    assert [(loop["target"], loop["count"], loop["start_record_index"]) for loop in loops] == [
+        ("EpiEchoPairs", 30, 7), ("nel", 4, 4), ("slice", 1, 2), ("start", 2, 1),
+    ]
+    assert sum(event["kind"] == "gradient" for event in events) == 1
+
+
+def test_full_ppg_keeps_epi_gradients_and_sampling_on_same_timeline(app_logic: GUIapp) -> None:
+    lines = {
+        16: "(rde1 de1 adc_job0 ph0 syrec_job0) (1u 1u ph1:r):f_job0",
+        50: "0u gc_control",
+        51: "{",
+        55: "loop PVM_EpiEchoCounter",
+        56: "{",
+        57: "EpiD5 grad_shape < xyzb0 > {EpiShape2() * 100, EpiShape4() * 100, 0, 0}",
+        63: "}",
+        66: "}",
+        69: "if(PVM_EpiPrefixNavYes) ; prefix navigator",
+        70: "{",
+        71: "EpiD2",
+        72: "}",
+        73: "else ; start sampling here",
+        74: "{",
+        81: "EpiD2 dwgen_job0",
+        83: "}",
+        85: "EpiD0 eoscnpzbwrif_job0",
+        99: "(rde1 de1 adc_job0 ph0 syrec_job0) (1u 1u ph1:r):f_job0",
+        116: "EpiD7 grad_ramp < xyzb0 > {1, 2, 0, 0}",
+        142: "EpiD0 eoscnpzbwrif_job0",
+    }
+    app_logic.pulseProgramStructure = {
+        "records": [{"source": "epi.mod", "line": line, "text": value} for line, value in lines.items()],
+        "parameters": {"PVM_EpiEchoCounter": 30.0, "PVM_EpiPrefixNavYes": "No", "EpiD0": 40e-6},
+    }
+    app_logic.pulseProgramTimeline = (
+        np.array([0.001, 0.002, 0.010, 0.0105, 0.011, 0.0302, 0.031]),
+        np.array([100, 101, 100, 100, 200, 201, 101]),
+    )
+    app_logic.pulseProgramLineMapping = {
+        100: {"source": "epi.mod", "line": 16},
+        101: {"source": "epi.mod", "line": 85},
+    }
+    app_logic.acquisitionWindowDetails = [{"start": 0.011, "end": 0.0302}]
+    events = app_logic.build_full_ppg_schematic_events()
+
+    assert [event["kind"] for event in events] == ["epi_readout", "loop"]
+    readout = events[0]
+    assert readout["duration"] == pytest.approx(0.02104)
+    assert readout["acquisition_windows"] == [(0.011, 0.0302)]
+    assert readout["count"] == 30
+    assert events[1]["expanded"] and events[1]["count"] == 30
+
+
 def test_ppg_duration_resolves_d_array_and_defined_delay_math(app_logic: GUIapp) -> None:
     app_logic.pulseProgramStructure = {"parameters": {"d3": 144e-6, "DE": 10e-6}}
 
@@ -916,6 +1040,20 @@ def test_ppg_duration_resolves_d_array_and_defined_delay_math(app_logic: GUIapp)
         app_logic.resolve_ppg_duration("d5m40u", {"d5m40u": "d3 - 40u"}),
         104e-6,
     )
+
+
+def test_full_ppg_decodes_named_delays_and_scientific_time_literals(app_logic: GUIapp) -> None:
+    lines = ["define delay gap = D3 - 4u", '"hold = gap + .5u"', "hold", "1e-3s", "d5", "ph1 = 1"]
+    app_logic.pulseProgramStructure = {
+        "records": [{"source": "demo.ppg", "line": i, "text": text} for i, text in enumerate(lines)],
+        "parameters": {"d3": 144e-6, "d5": 0.0},
+    }
+
+    events = app_logic.build_full_ppg_schematic_events()
+
+    assert [event["duration_token"] for event in events] == ["hold", "1e-3s", "d5"]
+    assert [event["duration"] for event in events] == pytest.approx([140.5e-6, 1e-3, 0])
+    assert app_logic.resolve_ppg_duration("cyclic", {"cyclic": "other", "other": "cyclic"}) is None
 
 
 def test_ppg_condition_resolves_paravision_diffusion_mode_enum(app_logic: GUIapp) -> None:

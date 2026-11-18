@@ -75,6 +75,8 @@ For ParaVision integration, use the wrapper script included in this repository.
 SIMVIEW_ERROR_LOG=/path/to/file /path/to/script/run_simview.sh
 ```
 
+When ParaVision launches the wrapper, choose **Signal Viewer** to load the simulated channels or **Full PPG** to open the compiled pulse-program schematic without loading the recorded signals.
+
 ## AlmaLinux / Qt Notes
 - On AlmaLinux, especially over remote connections, Qt may fail to start with an `xcb` or `libxcb-cursor.so.0` error
 - Install the missing system package:

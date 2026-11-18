@@ -1,3 +1,4 @@
+import argparse
 import sys
 import os
 from pathlib import Path
@@ -587,6 +588,11 @@ class GUIapp(
         self.registerShortcuts()
         self.update_status()
 
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        super().closeEvent(event)
+        if event.isAccepted():
+            self.close_sequence_schematic()
+
 
 def show_graphs_from_dict(data: dict) -> None:
     app = QApplication(sys.argv)
@@ -595,9 +601,45 @@ def show_graphs_from_dict(data: dict) -> None:
     app.exec()
 
 
-if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else None
-    app = QApplication(sys.argv)
+def open_startup_view(path: str | None, *, paravision: bool = False) -> GUIapp | None:
+    if paravision:
+        assert path is not None
+        prompt = QtWidgets.QMessageBox()
+        prompt.setWindowTitle("Open ParaVision Simulation")
+        prompt.setText("Choose how to open this simulation.")
+        prompt.setInformativeText(
+            "Signal Viewer loads the simulated channels. Full PPG opens the compiled pulse sequence directly."
+        )
+        signals = prompt.addButton("Signal Viewer", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        ppg = prompt.addButton("Full PPG", QtWidgets.QMessageBox.ButtonRole.ActionRole)
+        prompt.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        prompt.setDefaultButton(signals)
+        while True:
+            prompt.exec()
+            if prompt.clickedButton() is signals:
+                break
+            if prompt.clickedButton() is not ppg:
+                return None
+            gui = GUIapp()
+            if gui.open_compiled_ppg(path):
+                return gui
+            prompt.setText("Compiled pulse-program data could not be read from this simulation.")
+            prompt.setInformativeText("Open the Signal Viewer to load the recorded channels.")
+            ppg.setEnabled(False)
+
     gui = GUIapp(path)
     gui.show()
-    app.exec()
+    return gui
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Open a pulse-sequence simulation.")
+    parser.add_argument("path", nargs="?", help="simulation output folder")
+    parser.add_argument("--paravision", action="store_true", help="prompt for a view before loading the simulation")
+    args = parser.parse_args()
+    if args.paravision and args.path is None:
+        parser.error("--paravision requires a simulation output folder")
+    app = QApplication([sys.argv[0]])
+    gui = open_startup_view(args.path, paravision=args.paravision)
+    if gui is not None:
+        sys.exit(app.exec())

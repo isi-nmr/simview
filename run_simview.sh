@@ -17,13 +17,13 @@ export LD_LIBRARY_PATH=
 #    -> use current working directory.
 # 2) Manual: run_simview.sh /path/to/simulation_data
 #    -> switch to that folder first.
+LAUNCH_OPTIONS=()
 if [[ $# -ge 1 && -d "$1" ]]; then
-  TARGET_DIR="$1"
-  shift
-  cd "$TARGET_DIR"
+  cd "$1"
 else
-  TARGET_DIR="$PWD"
+  LAUNCH_OPTIONS+=(--paravision)
 fi
+TARGET_DIR="$PWD"
 
 # Error log (override with SIMVIEW_ERROR_LOG=/path/to/file).
 LOG_FILE="${SIMVIEW_ERROR_LOG:-$TARGET_DIR/simview_viewer_errors.log}"
@@ -85,7 +85,7 @@ while IFS= read -r platform; do
   export QT_QPA_PLATFORM="$platform"
   echo "[$(timestamp)] launching with .venv python: $VENV_PY (QT_QPA_PLATFORM=$platform)" >&2
   set +e
-  "$VENV_PY" "$APP_SCRIPT" "$TARGET_DIR"
+  "$VENV_PY" "$APP_SCRIPT" "${LAUNCH_OPTIONS[@]}" -- "$TARGET_DIR"
   rc=$?
   set -e
   if [[ $rc -eq 0 ]]; then

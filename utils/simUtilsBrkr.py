@@ -1,6 +1,7 @@
 import os
 import re
 from collections.abc import Callable, Mapping
+from functools import cache
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -25,7 +26,10 @@ def _get_bruker_pw_reference_watts() -> float:
 
 
 def find_origin_acquisition_path(sim_path: str) -> Path | None:
-    for output_path in sorted(Path(sim_path).glob("*.output")):
+    local_path = Path(sim_path)
+    if (local_path / "method").is_file() and (local_path / "acqp").is_file():
+        return local_path
+    for output_path in sorted(local_path.glob("*.output")):
         try:
             output_text = output_path.read_text(errors="replace")
         except OSError:
@@ -67,9 +71,12 @@ def read_pulse_program_structure(
     sim_path: str,
     pulse_program: str | None,
     pulse_program_path: str | None = None,
+    *,
+    include_recorded_gradients: bool = True,
 ) -> dict[str, object]:
     """Extract the exact precompiled PPG used by the simulation and loop counts."""
-    output_path = Path(sim_path) / "_FCube1.output"
+    local_path = Path(sim_path)
+    output_path = local_path / "_FCube1.output"
     try:
         text = output_path.read_text(errors="replace")
     except OSError:
@@ -77,6 +84,9 @@ def read_pulse_program_structure(
     main_source = Path(pulse_program or "").name
     precomp_match = re.search(r"^pulse program:\s*(.+?)\s*$", text, re.MULTILINE)
     precomp_path = Path(precomp_match.group(1)) if precomp_match else None
+    local_precomp = local_path / "pulseprogram.precomp"
+    if local_precomp.is_file():
+        precomp_path = local_precomp
     records: list[dict[str, object]] = []
     if precomp_path is not None:
         try:
@@ -87,7 +97,7 @@ def read_pulse_program_structure(
         current_source_path = str(precomp_path)
         current_line = 1
         directive_pattern = re.compile(r'^\s*#\s+(\d+)\s+"([^"]+)"(?:\s+\d+)*\s*$')
-        for raw_line in precomp_lines:
+        for internal_line, raw_line in enumerate(precomp_lines, start=1):
             directive = directive_pattern.match(raw_line)
             if directive:
                 current_line = int(directive.group(1))
@@ -100,21 +110,22 @@ def read_pulse_program_structure(
                 "source": current_source,
                 "source_path": current_source_path,
                 "line": current_line,
+                "internal_line": internal_line,
                 "text": raw_line.strip(),
             })
             current_line += 1
 
     # Older output formats may not retain or expose pulseprogram.precomp.
-    record_pattern = re.compile(r'^\s*\d+\s+"\'([^\']+)\': line (\d+)--->(.*)"$', re.MULTILINE)
-    records_by_location: dict[tuple[str, int], dict[str, object]] = {}
-    for source, line, source_text in record_pattern.findall(text):
-        # Later entries are the expanded/selected source listing. Earlier
-        # compiler diagnostics can reuse a source name with shifted line text.
-        records_by_location[(source, int(line))] = {
-            "source": source, "line": int(line), "text": source_text.strip(),
+    record_pattern = re.compile(r'^\s*(\d+)\s+"\'([^\']+)\': line (\d+)--->([^\r\n]*)$', re.MULTILINE)
+    records_by_line: dict[int, dict[str, object]] = {}
+    for internal_line, source, line, source_text in record_pattern.findall(text):
+        # An expanded subroutine can repeat a source location at a new compiler line.
+        records_by_line[int(internal_line)] = {
+            "source": source, "line": int(line), "text": source_text.removesuffix('"').strip(),
+            "internal_line": int(internal_line),
         }
     if not records:
-        records = list(records_by_location.values())
+        records = [records_by_line[line] for line in sorted(records_by_line)]
     if not records and pulse_program_path:
         source_path = Path(pulse_program_path)
         try:
@@ -128,10 +139,10 @@ def read_pulse_program_structure(
                 for line_number, source_text in enumerate(source_lines, start=1)
             )
 
-    loop_values: dict[str, int] = {}
     loop_match = re.search(r"loopcounters:\s*256 items\s*=+\s*(.*?)(?:\n\s*\n\s*delay increments)", text, re.DOTALL)
     loop_array = [int(value) for value in re.findall(r"\b\d+\b", loop_match.group(1))] if loop_match else []
-    for name, index in re.findall(r"^\s*(l\d+):\s+14\s+(\d+)\b", text, re.MULTILINE):
+    loop_values = {f"l{index}": value for index, value in enumerate(loop_array[:256])}
+    for name, index in re.findall(r"^\s*([A-Za-z_]\w*):\s+14\s+(\d+)\b", text, re.MULTILINE):
         array_index = int(index)
         if array_index < len(loop_array):
             loop_values[name] = loop_array[array_index]
@@ -152,10 +163,12 @@ def read_pulse_program_structure(
         r"[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?", pulse_match.group(1),
     )] if pulse_match else []
     parameters.update({f"p{index}": value for index, value in enumerate(pulse_values[:256])})
-    for name, array_index in re.findall(r"^\s*([A-Za-z_]\w*):\s+2\s+(\d+)\b", text, re.MULTILINE):
+    named_delays = re.findall(r"^\s*([A-Za-z_]\w*):\s+2\s+(\d+)\b", text, re.MULTILINE)
+    compiled_delays = {}
+    for name, array_index in named_delays:
         index = int(array_index)
         if index < len(delay_values):
-            parameters[name] = delay_values[index]
+            compiled_delays[name.casefold()] = parameters[name] = delay_values[index]
     for name, array_index in re.findall(r"^\s*([A-Za-z_]\w*):\s+4\s+(\d+)\b", text, re.MULTILINE):
         index = int(array_index)
         if index < len(pulse_values):
@@ -175,18 +188,41 @@ def read_pulse_program_structure(
         parameters.update(_read_jcamp_numeric_parameters(origin_path / "method"))
         acqp_parameters = _read_jcamp_numeric_parameters(origin_path / "acqp")
         parameters.update(acqp_parameters)
+        # ACQP D registers use seconds. Prefer the compiled register table
+        # for values that the simulator had available.
+        if isinstance(acqp_parameters.get("D"), list):
+            for index, value in enumerate(acqp_parameters["D"]):
+                parameters.setdefault(f"d{index}", value)
         # The PPG symbol ``de`` is the ACQP DE hardware delay, stored in µs.
         if isinstance(acqp_parameters.get("DE"), (int, float)):
             parameters["de"] = float(acqp_parameters["DE"]) * 1e-6
         gradient_registers = acqp_parameters.get("ACQ_gradient_amplitude", [])
         if isinstance(gradient_registers, list):
             parameters.update({f"g{index}": value for index, value in enumerate(gradient_registers)})
+    for symbol, parameter in (("PVM_VpTrim", "PVM_VpSpoilerStrength"), ("PVM_ChTrim", "PVM_ChSpoilerStrength")):
+        values = parameters.get(parameter)
+        if isinstance(values, list):
+            parameters.setdefault(symbol, values)
+    for match in re.finditer(
+        r'^(Delay|Loopcounter) list "(\w+)"[^\n]*:\s*(\d+) items?\s*\n=+\n([^\n]*(?:\n[ \t]+[^\n]+)*)',
+        text, re.MULTILINE,
+    ):
+        kind, name, count, data = match.groups()
+        values = [float(value) for value in re.findall(_GCON_NUMBER, data)]
+        if len(values) != int(count):
+            continue
+        if kind == "Delay":
+            parameters[name] = values
+        elif len(values) == 1 and values[0].is_integer():
+            loop_values[name] = int(values[0])
     gradient_ramps: list[list[float]] = []
-    gradient_output_path = Path(sim_path) / "_GCube.output"
+    gradient_output_path = local_path / "_GCube.output"
     try:
         gradient_output = gradient_output_path.read_text(errors="replace")
     except OSError:
         gradient_output = ""
+    gcon_sections = _gcon_sections(gradient_output)
+    gradient_function = _gcon_gradient_function(gcon_sections)
     ramp_matches = list(re.finditer(
         r"^ramp\s+(\d+):\s+(\d+)\s+items\s*\n-+\s*\n(.*?)(?=\n\s*(?:ramp\s+\d+:|pulse increments|\Z))",
         gradient_output, re.MULTILINE | re.DOTALL,
@@ -206,11 +242,36 @@ def read_pulse_program_structure(
         float(configured_ramp_ms) * 1e-3
         if isinstance(configured_ramp_ms, (int, float)) and configured_ramp_ms > 0 else None
     )
+    gradient_commands = {
+        record["internal_line"] for record in records
+        if "internal_line" in record and re.search(
+            r"\b(?:grad_(?:ramp|shape|off)|groff)\b", str(record["text"]).partition(";")[0], re.IGNORECASE,
+        )
+    }
+    compiled_lines = {
+        int(number)
+        for listing in re.findall(
+            r"^[ \t]*\w+:[ \t]+\d+(?:[ \t]+\d+){3}[ \t]+in lines:[ \t]+([\d \t]+)$",
+            text, re.MULTILINE,
+        )
+        for number in listing.split()
+    }
     return {
         "source": main_source, "records": records, "loop_values": loop_values,
+        "delay_names": [name for name, _ in named_delays],
+        "compiled_delays": compiled_delays, "compiled_lines": compiled_lines,
         "parameters": parameters, "output": str(output_path),
         "precomp": str(precomp_path) if precomp_path is not None else None,
+        "rf_shapes": _read_compiled_rf_shapes(text),
+        "rf_phase_lists": _read_compiled_phase_lists(text),
+        "frequency_lists_hz": _read_compiled_frequency_lists(text),
         "gradient_ramps": gradient_ramps,
+        "gradient_vectors": _read_shaped_gradient_vectors(gcon_sections, gradient_function),
+        "ramped_gradient_targets": _read_ramped_gradient_targets(gradient_output, gcon_sections, gradient_function),
+        "recorded_gradient_profiles": read_schematic_gradient_profiles(
+            local_path / "_GCube.xml", gradient_commands,
+            expected_samples=max((len(ramp) - 1 for ramp in gradient_ramps), default=0),
+        ) if include_recorded_gradients else {},
         # Ramp tables define normalized interpolation only. ParaVision's
         # physical transition time is configured independently in milliseconds.
         "gradient_ramp_durations": [
@@ -218,6 +279,353 @@ def read_pulse_program_structure(
             for ramp in gradient_ramps
         ],
         "gradient_ramp_time_source": "PVM_RampTime" if configured_ramp_seconds is not None else "Gcon raster fallback",
+    }
+
+
+_GCON_NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?"
+
+
+def _read_compiled_frequency_lists(output: str) -> dict[str, np.ndarray]:
+    headers = re.finditer(
+        r'^[ \t]*Frequency list "([^"]+)"[^\n]*?\s*:\s*(\d+) items?\s*\n=+[^\S\n]*\n',
+        output, re.MULTILINE | re.IGNORECASE,
+    )
+    frequency_lists = {}
+    for header in headers:
+        count = int(header[2])
+        values = []
+        for line in output[header.end():].splitlines():
+            tokens = line.split()
+            if not all(re.fullmatch(_GCON_NUMBER, token) for token in tokens):
+                break
+            values.extend(float(token) for token in tokens)
+            if len(values) >= count:
+                break
+        if count and len(values) == count:
+            offsets = np.asarray(values) * 1e6  # The compiler stores frequency offsets in MHz.
+            if np.isfinite(offsets).all():
+                frequency_lists[header[1].casefold()] = offsets
+    return frequency_lists
+
+
+def _read_compiled_rf_table(block: str, label: str) -> np.ndarray | None:
+    header = re.search(
+        rf"^[ \t]*{re.escape(label)}:[ \t]*(\d+)[ \t]+items?[ \t]*\n[ \t]*-+[ \t]*$",
+        block, flags=re.MULTILINE | re.IGNORECASE,
+    )
+    if header is None:
+        return None
+    count = int(header[1])
+    values = []
+    for line in block[header.end():].splitlines():
+        tokens = line.split()
+        if not all(re.fullmatch(_GCON_NUMBER, token) for token in tokens):
+            break
+        values.extend(float(token) for token in tokens)
+        if len(values) > count:
+            return None
+    if not values or len(values) != count:
+        return None
+    samples = np.asarray(values, dtype=float)
+    return samples if np.isfinite(samples).all() else None
+
+
+def _read_compiled_rf_shapes(output: str) -> dict[tuple[str, int], list[dict[str, object]]]:
+    headers = list(re.finditer(
+        r"^[ \t]*shape(?:[ \t]+list[ \t]*\[(\d+)\]:|"
+        r"[ \t]*\[\d+\]:[ \t]*(\w+)[ \t]+on[ \t]+NCO[ \t]*(\d+)\b)",
+        output, flags=re.MULTILINE | re.IGNORECASE,
+    ))
+    power_channels = {
+        (int(pointer), int(nco)): int(channel)
+        for pointer, channel, nco in re.findall(
+            r"^[ \t]*\[(\d+)\]:[ \t]*Power for f(\d+) on NCO(\d+):",
+            output, flags=re.MULTILINE | re.IGNORECASE,
+        )
+    }
+    shapes: dict[tuple[str, int], list[dict[str, object]]] = {}
+    shape_list = None
+    for index, header in enumerate(headers):
+        if header[1] is not None:
+            shape_list = int(header[1])
+            continue
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(output)
+        block = output[header.end():end]
+        duration_match = re.search(rf"\bdur[ \t]*=[ \t]*({_GCON_NUMBER})[ \t]+us\b", block, re.IGNORECASE)
+        if duration_match is None:
+            continue
+        duration = float(duration_match[1]) * 1e-6
+        amplitude = _read_compiled_rf_table(block, "amplitudes")
+        if amplitude is None or not np.isfinite(duration) or duration <= 0.0:
+            continue
+        peak = float(np.max(np.abs(amplitude)))
+        if peak:
+            amplitude /= peak
+        phase_words = _read_compiled_rf_table(block, "phases")
+        phase = None
+        if phase_words is not None and phase_words.shape == amplitude.shape and np.all(
+            (phase_words >= 0) & (phase_words < 65536) & (phase_words == np.floor(phase_words))
+        ):
+            # The shape registry stores the phase of each slice as a 16-bit turn.
+            phase = phase_words * (360.0 / 65536)
+        nco = int(header[3])
+        shape: dict[str, object] = {"duration": duration, "amplitude": amplitude, "phase": phase}
+        offset = re.search(rf"\boffsFreq[ \t]*=[ \t]*({_GCON_NUMBER})", block.partition("\n")[0])
+        if offset is not None and np.isfinite(hz := float(offset[1]) * 1e6):
+            shape["offset_hz"] = hz
+        if shape_list is not None:
+            shape["shape_list"] = shape_list
+        pointer = re.search(r"\bpoino[ \t]*=[ \t]*(\d+)\b", block, re.IGNORECASE)
+        channel = power_channels.get((int(pointer[1]), nco)) if pointer is not None else None
+        if channel is not None:
+            shape["channel"] = channel
+        shapes.setdefault((header[2].lower(), nco), []).append(shape)
+    return shapes
+
+
+def _read_compiled_phase_lists(output: str) -> dict[tuple[str, int], np.ndarray]:
+    headers = list(re.finditer(
+        r"^[ \t]*Phaselist[ \t]+#\d+[ \t]+(\w+)[ \t]+on\b",
+        output, flags=re.MULTILINE | re.IGNORECASE,
+    ))
+    phase_lists: dict[tuple[str, int], np.ndarray] = {}
+    for index, header in enumerate(headers):
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(output)
+        block = output[header.end():end]
+        nco = re.search(r"\bNCO[ \t]*=[ \t]*(\d+)\b", block, flags=re.IGNORECASE)
+        phases = _read_compiled_rf_table(block, "original list")
+        if nco is not None and phases is not None:
+            phase_lists.setdefault((header[1].lower(), int(nco[1])), phases)
+    return phase_lists
+
+
+def _gcon_sections(output: str) -> dict[str, str]:
+    parts = re.split(r"^Gcon:[ \t]*([^\r\n]+)\r?\n-+[ \t]*$", output, flags=re.MULTILINE)
+    return {name.strip(): body for name, body in zip(parts[1::2], parts[2::2], strict=True)}
+
+
+def _gcon_gradient_function(sections: dict[str, str]) -> Callable[[int], np.ndarray | None]:
+    """Resolve a point's function relation, including chained multiplicative modifiers."""
+    shapes = {}
+    shape_section = sections.get("Gradient Shape Values", "")
+    for match in re.finditer(
+        r"^shape +([0-9]+): +(\d+) +items?\s*\n-+\s*\n(.*?)(?=^shape +\d+|\Z)",
+        shape_section, re.MULTILINE | re.DOTALL,
+    ):
+        index, sample_count = map(int, match.groups()[:2])
+        samples = np.array([float(value) for value in re.findall(_GCON_NUMBER, match[3])])
+        if samples.size == sample_count and np.isfinite(samples).all():
+            shapes[index] = samples
+    relations = {
+        int(index): (int(shape), float(scale), int(modifier))
+        for index, shape, scale, modifier in re.findall(
+            rf"^[ \t]*(\d+):[ \t]+\d+[ \t]+(\d+)[ \t]+({_GCON_NUMBER})[ \t]+(-?\d+)[ \t]*$",
+            sections.get("Gradient Points to Function Relation", ""), re.MULTILINE,
+        )
+    }
+    @cache
+    def function_values(index: int) -> np.ndarray | None:
+        values = np.ones(1)
+        visited = set()
+        while index >= 0:
+            if index not in relations or index in visited:
+                return None
+            visited.add(index)
+            shape, scale, index = relations[index]
+            samples = shapes.get(shape)
+            if samples is None or (values.size != 1 and samples.size not in {1, values.size}):
+                return None
+            values = values * (scale * samples)
+        return values if np.isfinite(values).all() else None
+
+    return function_values
+
+
+def _read_shaped_gradient_vectors(
+    sections: dict[str, str], function_values: Callable[[int], np.ndarray | None],
+) -> list[np.ndarray]:
+    """Read the compiled XYZ samples for shaped Gcon vector points, in program order."""
+    # The XYZB0 vector in this table names three gradient channels and B0.
+    axes = re.search(r"\b0:\s*0,\s*1,\s*2,\s*3\b", sections.get("GradientVectors", ""))
+    if not axes:
+        return []
+
+    vectors = []
+    points = sections.get("GradientVectorPoints", "")
+    for match in re.finditer(
+        r"^[ \t]*\d+:[ \t]+gvec_idx=[ \t]*(\d+)\b(.*?)(?=^[ \t]*\d+:[ \t]+gvec_idx=|\Z)",
+        points, re.MULTILINE | re.DOTALL,
+    ):
+        if int(match[1]) != 0:
+            continue
+        rows = re.findall(
+            rf"^[ \t]*Shaped[ \t]+({_GCON_NUMBER}),[ \t]*(\d+)[ \t]+(\d+):[ \t]+"
+            rf"({_GCON_NUMBER})[ \t]+(\d+)[ \t]+(\d+)[ \t]+(\d+)[ \t]+(\d+)[ \t]*$",
+            match[2], re.MULTILINE,
+        )
+        if len(rows) != 4:
+            return []
+        sample_count = int(rows[0][2])
+        if not sample_count or any(int(row[2]) != sample_count for row in rows):
+            return []
+        vector = np.zeros((3, sample_count))
+        for axis, (delay, delay_index, _, base, first, count, first_sample, sample_relations) in enumerate(rows[:3]):
+            if float(delay) or int(delay_index):
+                return []
+            values = vector[axis]
+            values[:] = float(base)
+            for relation_start, relation_count in ((first, count), (first_sample, sample_relations)):
+                for index in range(int(relation_start), int(relation_start) + int(relation_count)):
+                    samples = function_values(index)
+                    if samples is None or samples.size not in {1, sample_count}:
+                        return []
+                    values += samples
+        vectors.append(vector * 100.0)
+    return vectors
+
+
+def _read_ramped_gradient_targets(
+    output: str, sections: dict[str, str], function_values: Callable[[int], np.ndarray | None],
+) -> list[tuple[np.ndarray, ...] | None]:
+    """Decode physical XYZ targets and any target lists from the first slice."""
+    header = re.search(r"\bn_gpoints\s*=\s*(\d+)[^\n]*\bn_slices\s*=\s*(\d+)", output)
+    axes = re.search(r"\bdigsgradchanmap\s*=\s*0,\s*1,\s*2\b", output)
+    section = sections.get("Gradient Points")
+    if header is None or axes is None or section is None:
+        return []
+    point_count, slice_count = map(int, header.groups())
+    if not point_count or not slice_count:
+        return []
+
+    rows = re.findall(
+        rf"^[ \t]*(\w+)\s+({_GCON_NUMBER}),\s*(\d+)\s+(\d+):\s+"
+        rf"({_GCON_NUMBER})\s+(\d+)\s+(\d+)\s+\d+\s+(\d+)[ \t]*$",
+        section, re.MULTILINE,
+    )
+    axis_stride = point_count * slice_count
+    if len(rows) != 3 * axis_stride:
+        return []
+
+    def axis_values(row: tuple[str, ...]) -> np.ndarray | None:
+        kind, delay, delay_index, count, base, first, functions, sample_functions = row
+        if kind != "Ramped" or float(delay) != 0 or delay_index != "0" or count != "1" or sample_functions != "0":
+            return None
+        values = np.array([float(base)])
+        for index in range(int(first), int(first) + int(functions)):
+            samples = function_values(index)
+            if samples is None or (values.size != 1 and samples.size not in {1, values.size}):
+                return None
+            values = values + samples
+        if not np.isfinite(values).all():
+            return None
+        return values[:1] if np.all(values == values[0]) else values
+
+    targets = []
+    for point in range(point_count):
+        values = tuple(axis_values(rows[axis * axis_stride + point]) for axis in range(3))
+        targets.append(values if all(value is not None for value in values) else None)
+    return targets
+
+
+def build_compiled_epi_waveform(
+    structure: Mapping[str, object], records: list[dict],
+) -> dict[str, object] | None:
+    """Reconstruct a shaped EPI readout from compiler tables and method timing."""
+    vectors = structure.get("gradient_vectors", [])
+    if not vectors:
+        return None
+    parameters = structure.get("parameters", {})
+    codes = [str(record.get("text", "")).partition(";")[0].strip() for record in records]
+    job = re.search(r"\badc_job(\d+)\b", codes[0], re.IGNORECASE) if codes else None
+    if not job:
+        return None
+    gate = f"dwgen_job{job[1]}"
+    gate_indices = [index for index, code in enumerate(codes) if re.search(rf"\b{gate}\b", code, re.IGNORECASE)]
+    if len(gate_indices) != 1:
+        return None
+
+    control_index = next(
+        (index for index, code in enumerate(codes) if re.fullmatch(r"0u\s+gc_control", code, re.IGNORECASE)),
+        None,
+    )
+    loop_match = None
+    loop_index = None
+    gradient_indices = []
+    delay_names = []
+    for index, code in enumerate(codes):
+        loop = re.fullmatch(r"loop\s+(\w+)", code, re.IGNORECASE)
+        if loop:
+            if loop_match is not None:
+                return None
+            loop_match, loop_index = loop, index
+        if re.search(r"\bgrad_shape\b", code, re.IGNORECASE):
+            shape = re.match(r"(\w+)\s+grad_shape\s*<\s*xyzb0\s*>", code, re.IGNORECASE)
+            if not shape:
+                return None
+            gradient_indices.append(index)
+            delay_names.append(shape[1])
+    if control_index is None or loop_match is None or len(gradient_indices) != len(vectors):
+        return None
+    loop_close = next((index for index in range(loop_index + 1, len(codes)) if codes[index] == "}"), None)
+    if loop_close is None or not (control_index < gradient_indices[0] <= loop_index < loop_close < gate_indices[0]):
+        return None
+
+    timing_names = (
+        "PVM_EpiGradDwellTime", "PVM_EpiPlateau", "PVM_EpiModuleTime",
+        "EpiD0", "EpiD1", "EpiD2", "EpiD3", loop_match[1],
+    )
+    timing = [parameters.get(name) for name in timing_names]
+    if any(not isinstance(value, (int, float)) or not np.isfinite(value) or value < 0 for value in timing):
+        return None
+    dwell_us, plateau_ms, module_ms, tail, before_sampling, sampling, after_sampling, repeat_count = timing
+    dwell, plateau, duration = dwell_us * 1e-6, plateau_ms * 1e-3, module_ms * 1e-3
+    if min(dwell, plateau, sampling, repeat_count) <= 0 or int(repeat_count) != repeat_count:
+        return None
+    # Gcon runs in parallel with the FCube delays following gc_control.
+    # Their sum excludes the setup at the beginning of the EPI module.
+    setup = duration - (before_sampling + sampling + after_sampling + tail)
+    if setup < 0 or not all(control_index < index < gate_indices[0] for index in gradient_indices):
+        return None
+
+    segments = []
+    shape_durations = {}
+    for index, delay_name, values in zip(gradient_indices, delay_names, vectors, strict=True):
+        delay = parameters.get(delay_name)
+        if not isinstance(delay, (int, float)):
+            delay = plateau if delay_name.lower() == "epid11" else values.shape[1] * dwell
+        if not np.isfinite(delay) or delay <= 0:
+            return None
+        segments.append((index, delay, values))
+        shape_durations[delay_name] = delay
+    prefix = [(delay, values) for index, delay, values in segments if index < loop_index]
+    loop_body = [(delay, values) for index, delay, values in segments if loop_index < index < loop_close]
+    suffix = [(delay, values) for index, delay, values in segments if loop_close < index]
+    if not loop_body:
+        return None
+    loop_start = setup + sum(delay for delay, _ in prefix)
+    loop_end = loop_start + repeat_count * sum(delay for delay, _ in loop_body)
+    train_end = loop_end + sum(delay for delay, _ in suffix)
+    if train_end > duration + 1e-10:
+        return None
+
+    cursor = setup
+    times = [np.array([0.0])] if setup > 0 else []
+    values = [np.zeros((3, 1))] if setup > 0 else []
+    for delay, samples in prefix + loop_body * int(repeat_count) + suffix:
+        sample_count = samples.shape[1]
+        times.append(cursor + np.arange(sample_count) * (delay / sample_count))
+        values.append(samples)
+        cursor += delay
+    times.append(np.array([duration]))
+    values.append(values[-1][:, -1:])
+    return {
+        "duration": duration,
+        "gradient_time": np.concatenate(times),
+        "gradient_values": np.concatenate(values, axis=1),
+        "gradient_shape_durations": shape_durations,
+        "gradient_train_duration": train_end - setup,
+        "acquisition_windows": [(setup + before_sampling, setup + before_sampling + sampling)],
+        "loop_bounds": (loop_start, loop_end),
     }
 
 
@@ -281,34 +689,63 @@ def _is_acquisition_end_event(event: Mapping[str, object]) -> bool:
     return any(key in event for key in ("wr", "if", "df", "rf"))
 
 
+def _dwell_program_line(event: Mapping[str, object]) -> tuple[str, str] | None:
+    # Bruker encodes the DWELL-PROGRAM number followed by a six-digit
+    # line number. Both seven- and eight-digit markers occur in simulations.
+    number = str(event.get("ln", ""))
+    program, line = number[:-6], number[-6:]
+    if line in {"000000", "000001"} and program.isdecimal():
+        return program, line[-1]
+    return None
+
+
 def _is_sample_acquisition_end_event(event: Mapping[str, object]) -> bool:
-    # Bruker versions use different acquisition-job prefixes (for example
-    # 10000001 and 11000001); the common suffix identifies sample completion.
-    return bool(re.fullmatch(r"1\d{6}1", str(event.get("ln", ""))))
+    dwell_line = _dwell_program_line(event)
+    return dwell_line is not None and dwell_line[1] == "1"
 
 
-def read_fcube_job_line_map(path: str, fcube_stem: str) -> dict[str, str]:
+def _read_fcube_job_markers(path: str, fcube_stem: str) -> tuple[dict[str, str], set[str]]:
     output_path = Path(path) / f"{fcube_stem}.output"
-    if not output_path.exists():
-        return {}
-
     job_line_map: dict[str, str] = {}
-    line_pattern = re.compile(r"^\s*(\d+)\s+\".*?_job(\d+)")
-    with output_path.open(errors="replace") as handle:
+    eos_lines: set[str] = set()
+    try:
+        handle = output_path.open(errors="replace")
+    except OSError:
+        return job_line_map, eos_lines
+    # Long records may omit their closing quote in the compiled listing.
+    line_pattern = re.compile(r'^\s*(\d+)\s+"[^\n]*?--->(.*)')
+    acquisition_pattern = re.compile(r"\b(adc|dwgen|eos[a-z0-9]*)_(\w+)\b", re.IGNORECASE)
+    numeric_pattern = re.compile(r"\b\w+_job(\d+)\b", re.IGNORECASE)
+    with handle:
         for line in handle:
             match = line_pattern.search(line)
-            if match is not None:
-                job_line_map[match.group(1)] = match.group(2)
+            if match is None:
+                continue
+            line_number, code = match.groups()
+            code = code.partition(";")[0]
+            acquisition = acquisition_pattern.search(code)
+            if acquisition is not None:
+                opcode, job = acquisition.groups()
+                numeric_job = re.fullmatch(r"job(\d+)", job, re.IGNORECASE)
+                job_line_map[line_number] = numeric_job[1] if numeric_job is not None else job
+                if opcode.lower().startswith("eos"):
+                    eos_lines.add(line_number)
+            elif numeric_job := numeric_pattern.search(code):
+                job_line_map[line_number] = numeric_job[1]
+    return job_line_map, eos_lines
 
-    return job_line_map
 
-
-def annotate_fcube_event_jobs(info: dict[str, object], job_line_map: Mapping[str, str]) -> None:
+def annotate_fcube_event_jobs(
+    info: dict[str, object], job_line_map: Mapping[str, str], eos_lines: set[str] | None = None,
+) -> None:
     events = info.get("events", [])
     if not isinstance(events, list) or not job_line_map:
         return
+    if eos_lines:
+        info["acquisitionEosLines"] = eos_lines
 
     current_job: str | None = None
+    dwell_jobs: dict[str, str] = {}
     for event in events:
         if not isinstance(event, dict):
             continue
@@ -316,7 +753,15 @@ def annotate_fcube_event_jobs(info: dict[str, object], job_line_map: Mapping[str
         if line_number in job_line_map:
             current_job = job_line_map[line_number]
             event["job"] = current_job
-        elif current_job is not None and ("rgp" in event or _is_sample_acquisition_end_event(event)):
+        dwell_line = _dwell_program_line(event)
+        if dwell_line is not None:
+            program, line = dwell_line
+            if line == "0" and current_job is not None and _is_rgp_active(event.get("rgp", "")):
+                dwell_jobs[program] = current_job
+            job = dwell_jobs.get(program, current_job)
+            if job is not None:
+                event["job"] = job
+        elif current_job is not None and "rgp" in event:
             event["job"] = current_job
 
 
@@ -383,35 +828,64 @@ def extract_acquisition_windows(event_infos: list[dict[str, object]]) -> dict[st
 
 
 def extract_sample_acquisition_windows(event_infos: list[dict[str, object]]) -> dict[str, list[tuple[float, float]]]:
-    return extract_best_windows(event_infos, _is_sample_acquisition_end_event)
+    return _group_sample_windows_by_nco(extract_sample_acquisition_window_details(event_infos))
+
+
+def _group_sample_windows_by_nco(details: list[dict[str, object]]) -> dict[str, list[tuple[float, float]]]:
+    windows: dict[str, list[tuple[float, float]]] = {}
+    for detail in details:
+        windows.setdefault(str(detail["nco"]), []).append((float(detail["start"]), float(detail["end"])))
+    return windows
 
 
 def extract_sample_acquisition_window_details(event_infos: list[dict[str, object]]) -> list[dict[str, object]]:
     """Return de-duplicated sample windows with the originating job-line type."""
-    details: dict[tuple[str, float, float], dict[str, object]] = {}
+    details: dict[tuple[str, float], tuple[bool, dict[str, object]]] = {}
     for info in event_infos:
-        pending: dict[str, list[dict[str, object]]] = {}
+        starts: dict[tuple[str, str | None, str], float] = {}
+        eos_lines = info.get("acquisitionEosLines", ())
         for event in info.get("events", []):
             if not isinstance(event, dict) or "t" not in event:
                 continue
-            nco = str(event.get("nco", "1"))
+            event_time = float(event["t"])
+            dwell_line = _dwell_program_line(event)
+            program = dwell_line[0] if dwell_line is not None else None
+            job = str(event.get("job", ""))
+            nco = str(event.get("nco", ""))
             if "rgp" in event and _is_rgp_active(event["rgp"]):
-                pending.setdefault(nco, []).append(event)
-            if not _is_sample_acquisition_end_event(event):
+                starts[(nco or "1", program, job)] = event_time
                 continue
-            starts = pending.get(nco, [])
-            if not starts:
+            exact = dwell_line is not None and dwell_line[1] == "1"
+            if exact:
+                matches = (
+                    (key, time) for key, time in starts.items()
+                    if time < event_time and nco in {"", "0", key[0]}
+                    and (key[1] == program or (key[1] is None and (not job or job == key[2])))
+                )
+                match = max(matches, key=lambda pair: (pair[0][1] == program, pair[1]), default=None)
+            elif job and str(event.get("ln", "")) in eos_lines and _is_acquisition_end_event(event):
+                matches = (
+                    (key, time) for key, time in starts.items()
+                    if time < event_time and key[2] == job
+                )
+                match = max(matches, key=lambda pair: pair[1], default=None)
+            else:
                 continue
-            start = starts.pop(0)
-            start_time, end_time = float(start["t"]), float(event["t"])
-            if end_time <= start_time:
+            if match is None:
                 continue
-            line = str(start.get("ln", ""))
-            job_type = f"job {line[:2]}" if len(line) >= 2 else "ADC"
-            details[(nco, start_time, end_time)] = {
-                "nco": nco, "start": start_time, "end": end_time, "job_type": job_type,
+            (receive_nco, start_program, start_job), start_time = match
+            identity = receive_nco, start_time
+            # The same start can occur in multiple FCubes. Prefer a dwell end
+            # over a later EOS write and never infer a duration from another job.
+            if identity in details and (details[identity][0] or not exact):
+                continue
+            job_type = start_job if start_job and not start_job.isdecimal() else (
+                f"job {start_program}" if start_program is not None else "ADC"
+            )
+            details[identity] = exact, {
+                "nco": receive_nco, "start": start_time, "end": event_time, "job_type": job_type,
             }
-    return sorted(details.values(), key=lambda item: (float(item["start"]), str(item["nco"])))
+    return [details[key][1] for key in sorted(details, key=lambda key: (key[1], key[0]))]
 
 
 def extract_best_windows(
@@ -550,6 +1024,49 @@ def _find_gradient_attrs_in_xml_line(line: bytes) -> dict[str, float]:
     for match in re.finditer(rb'g(\d+)="([^"]+)"', line):
         gradient_attrs[f"g{int(match.group(1))}"] = float(match.group(2))
     return gradient_attrs
+
+
+def read_schematic_gradient_profiles(
+    path: Path, commands: set[int], *, expected_samples: int,
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    """Keep the first complete GCube transition for each compiled gradient command."""
+    if expected_samples < 2 or not commands or not path.is_file():
+        return {}
+    time_unit = _read_timeunit_from_xml_bytes(str(path))
+    profiles = {}
+    active_line = None
+    samples = []
+    levels = {"g1": 0.0, "g2": 0.0, "g3": 0.0}
+
+    def finish_profile() -> None:
+        if active_line not in commands or active_line in profiles or len(samples) < expected_samples:
+            return
+        first_scan = np.asarray(samples[:expected_samples], dtype=float)
+        profiles[active_line] = (
+            (first_scan[:, 0] - first_scan[0, 0]) * time_unit, first_scan[:, 1:].T,
+        )
+
+    with path.open("rb") as stream:
+        for line in stream:
+            if not line.lstrip().startswith(b"<ev "):
+                continue
+            number = _find_xml_attr(line, b' ln="')
+            line_id = int(number) if number and number.isdigit() else None
+            if line_id is not None and line_id != active_line:
+                finish_profile()
+                active_line, samples = line_id, []
+            gradient = _find_gradient_attrs_in_xml_line(line)
+            if not gradient:
+                continue
+            for axis in levels.keys() & gradient.keys():
+                levels[axis] = gradient[axis]
+            if line_id not in commands or line_id in profiles or len(samples) >= expected_samples:
+                continue
+            timestamp = _find_xml_attr(line, b' t="')
+            if timestamp is not None:
+                samples.append((float(timestamp), *levels.values()))
+    finish_profile()
+    return profiles
 
 
 def _read_timeunit_from_xml_bytes(xml_path: str) -> float:
@@ -909,7 +1426,7 @@ def readRFEvents(
         gCube = xmltodict.parse(f.read())
 
     ncos, info = getRFEvents(gCube, progress_callback=progress_callback, progress_label=progress_label)
-    annotate_fcube_event_jobs(info, read_fcube_job_line_map(path, "_FCube1"))
+    annotate_fcube_event_jobs(info, *_read_fcube_job_markers(path, "_FCube1"))
 
     return ncos, info
 
@@ -943,7 +1460,7 @@ def read_all_fcube_event_infos(
             progress_label=f"Parsing {fcube_path.name}",
         )
         info["fcube"] = fcube_path.stem
-        annotate_fcube_event_jobs(info, read_fcube_job_line_map(path, fcube_path.stem))
+        annotate_fcube_event_jobs(info, *_read_fcube_job_markers(path, fcube_path.stem))
         event_infos.append(info)
     if progress_callback is not None:
         progress_callback(1.0, "Parsed FCube files")
@@ -1086,8 +1603,9 @@ def parseBrkrChannels(
         skip_fcube_stems={"_FCube1"},
     ))
     apply_acquisition_windows_to_rgp(ncos, extract_acquisition_windows(event_infos))
-    apply_windows_to_nco_gate(ncos, extract_sample_acquisition_windows(event_infos), "acq")
-    info["sampleAcquisitionWindows"] = extract_sample_acquisition_window_details(event_infos)
+    sample_windows = extract_sample_acquisition_window_details(event_infos)
+    apply_windows_to_nco_gate(ncos, _group_sample_windows_by_nco(sample_windows), "acq")
+    info["sampleAcquisitionWindows"] = sample_windows
     emit_progress(76, "Building event annotations")
     event_annotations = build_pulse_program_event_annotations(
         event_infos,
