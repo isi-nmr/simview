@@ -568,6 +568,67 @@ def test_full_ppg_uses_only_active_slice_polarities(slice_alter: str) -> None:
         assert shaped[2, 1, 1] == mixed[2, 1, 1] == 20
 
 
+@pytest.mark.parametrize(("scales", "scale_cursor", "expected_scales"), [
+    ((1, 1, 1, 1), 3, (1,)),
+    ((.5, 1, 1.5, 2), 3, (.5, 1, 1.5, 2)),
+    ((.5, 1, 2), 3, (.5, 1, 2)),
+    ((.5, 2), 2, (2,)),
+])
+def test_full_ppg_decodes_chained_test_gradient_and_paired_adc(
+    qapp: QtWidgets.QApplication, tmp_path: Path, scales: tuple[float, ...], scale_cursor: int,
+    expected_scales: tuple[float, ...],
+) -> None:
+    from utils.simUtilsBrkr import read_pulse_program_structure
+
+    (tmp_path / "method").write_text("##$PVM_DummyScans=0\n")
+    (tmp_path / "acqp").touch()
+    (tmp_path / "pulseprogram.precomp").write_text(
+        "define loopcounter lds = {$PVM_DummyScans}\n"
+        "define delay readDur = 12u\n"
+        "start, (rde1 de1 adc_job0 ph1) (1u 1u TxPhaseList:r):f_job0\n"
+        "readDur dwgen_job0 grad_shape{0,0,shape()*enabled*scaling}\n"
+        "1u enabled.inc\n"
+        '"lds = lds - 1"\n'
+        'if "lds> = 0" goto start\n'
+    )
+    (tmp_path / "_FCube1.output").write_text(
+        " [9]: CPD for f1 on NCO1:\n cpd program: DWELL-PROGRAM\n"
+        " fixdel(12.000000 usec) fcubeRtps[0]: set=DwenA, clr=none\n"
+        " readDur deccmd f1: CPDSNG prog 16 (CPDPRG17) via ptr 9 NEXTGRAD\n"
+    )
+    (tmp_path / "_GCube.output").write_text(
+        " n_gpoints = 1, n_slices = 1\n digsgradchanmap = 0, 1, 2, 3\n"
+        "Gcon: Gradient Points\n----\n"
+        + "Shaped 0, 0 3: 0 0 0 0 0\n" * 2
+        + "Shaped 0, 0 3: 0 0 0 0 1\n"
+        "Gcon: Gradient Points to Function Relation\n----\n"
+        f"0: 1 1 1 1\n1: 2 2 1 2\n2: {scale_cursor} 3 0.5 -1\n"
+        "Gcon: Gradient Shape Values\n----\n"
+        "shape 1: 3 items\n----\n0 0.4 -0.2\n"
+        "shape 2: 2 items\n----\n0 1\n"
+        f"shape 3: {len(scales)} items\n----\n" + " ".join(map(str, scales)) + "\n"
+    )
+    gui = GUIapp.__new__(GUIapp)
+    gui.pulseProgramStructure = read_pulse_program_structure(str(tmp_path), "demo.ppg", include_recorded_gradients=False)
+    compiled = gui.pulseProgramStructure["sampled_gradient_points"][0]
+    np.testing.assert_allclose(
+        np.unique(compiled[2, :, 1]), [0, *(20 * scale for scale in expected_scales)],
+    )
+    plot = pg.PlotWidget()
+    gui.render_full_ppg_schematic(plot)
+
+    curves = plot.listDataItems()
+    gradients = [curve for curve in curves if curve.toolTip().startswith("Gz compiled gradient")]
+    assert len(gradients) == 1 + len(expected_scales)
+    gradient = max(gradients, key=lambda curve: np.ptp(curve.getData()[1]))
+    np.testing.assert_allclose(gradient.getData()[1], 1 + .42 * max(expected_scales) * np.array([0, .2, -.1, -.1]))
+    adc, = [curve for curve in curves if curve.toolTip().startswith("ADC")]
+    assert adc.toolTip() == "ADC · 12 µs"
+    np.testing.assert_allclose(adc.getData()[0], gradient.getData()[0][[0, -1]])
+    assert any(isinstance(item, pg.TextItem) and item.toPlainText() == "Dummy scans ×0" for item in plot.items())
+    plot.close()
+
+
 def test_full_ppg_keeps_parallel_gradients_on_the_rf_and_adc_timeline(qapp: QtWidgets.QApplication) -> None:
     gui = GUIapp.__new__(GUIapp)
     gui.channels = []

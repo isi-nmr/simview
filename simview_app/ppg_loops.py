@@ -144,7 +144,7 @@ def resolve_backward_jump_count(
     """Resolve the common countdown loop with a forward exit and backward jump."""
     direct_condition = re.match(r'if\s+"([^"]+)"\s+goto\b', codes[end], re.IGNORECASE)
     if direct_condition:
-        countdown = re.fullmatch(r"(\w+)\s*>=\s*0", direct_condition[1])
+        countdown = re.fullmatch(r"(\w+)\s*>\s*=\s*0", direct_condition[1])
         if countdown:
             counter = countdown[1]
             update = next((code for code in reversed(codes[start:end]) if code), "")

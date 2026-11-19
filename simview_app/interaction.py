@@ -518,6 +518,7 @@ class InteractionMixin:
                 if depth == 0:
                     break
                 gcon_blocks[index] = control
+        adc_setups: dict[str, dict] = {}
         epi_readout_end = -1
         for record_index, record in enumerate(active_records):
             if record_index <= epi_readout_end:
@@ -629,6 +630,14 @@ class InteractionMixin:
                         self.select_fixed_ppg_gradient_polarity(event, codes[record_index])
             if record_index in frequency_offsets:
                 event["frequency_offsets"] = frequency_offsets[record_index]
+            if kind in {"acquisition", "gradient"}:
+                code = codes[record_index]
+                if gate_job := re.search(r"\bdwgen_(\w+)\b", code, re.IGNORECASE):
+                    setup = adc_setups.pop(gate_job[1].casefold(), None)
+                    if setup is not None and (event.get("adc_gate") or 0) > 0:
+                        setup["paired_adc_gate"] = True
+                elif setup_job := re.search(r"\badc_(\w+)\b", code, re.IGNORECASE):
+                    adc_setups[setup_job[1].casefold()] = event
             events.append(event)
         return self.annotate_ppg_gradient_variants(events, active_records, structure.get("parameters", {}))
 
@@ -1231,6 +1240,12 @@ class InteractionMixin:
                     plot.addItem(item)
                     rf_label_end = label_right
             elif kind == "gradient":
+                gate = event.get("adc_gate")
+                if "ADC" in lanes and gate is not None and 0 < gate and physical_start + gate <= physical_edges[-1]:
+                    last_adc_gate_end = physical_start + gate
+                    self.render_ppg_adc_window(
+                        plot, left, float(display_time(last_adc_gate_end)), f"ADC · {self.format_ppg_duration(gate)}",
+                    )
                 waveform = event.get("compiled_gradient_samples")
                 if waveform is not None and duration is not None and duration > 0:
                     sample_count = waveform.shape[-1]
@@ -1244,10 +1259,6 @@ class InteractionMixin:
                         origin="compiled", sample_positions=display_time(physical_start + times),
                     )
                     gradient_ramp_ends = [right] * 3
-                    gate = event.get("adc_gate")
-                    if "ADC" in lanes and gate is not None and 0 < gate <= duration:
-                        adc_end = left + (right - left) * gate / duration
-                        self.render_ppg_adc_window(plot, left, adc_end, f"ADC · {self.format_ppg_duration(gate)}")
                     continue
                 profiles = self.pulseProgramStructure.get("recorded_gradient_profiles", {})
                 profile = profiles.get(event.get("internal_line"))
@@ -1400,6 +1411,8 @@ class InteractionMixin:
             elif kind == "epi_readout":
                 gradient_states = self.render_ppg_epi_readout(plot, event, left, right, lanes=lanes)
             elif kind == "acquisition" and "ADC" in lanes:
+                if event.get("paired_adc_gate"):
+                    continue
                 gate = event.get("adc_gate")
                 if gate is not None and 0 < gate and physical_start + gate <= physical_edges[-1]:
                     last_adc_gate_end = physical_start + gate
