@@ -216,6 +216,48 @@ def test_full_ppg_shows_frequency_offsets_and_the_loop_range(
     plot.close()
 
 
+def test_full_ppg_uses_explicit_ramp_time(qapp: QtWidgets.QApplication) -> None:
+    gui = GUIapp.__new__(GUIapp)
+    gui.pulseProgramStructure = {
+        "records": [{"source": "SvGradTest.ppg", "line": 1, "text": "d3 grad_ramp<magnet_coord, d5>{20,0,0}"}],
+        "parameters": {"d3": .01, "d5": .002},
+        "gradient_ramps": [[0, 1]] * 3,
+        "gradient_ramp_durations": [.000144] * 3,
+    }
+    event, = gui.build_full_ppg_schematic_events()
+    assert event["gradient_ramp_token"] == "d5"
+    assert event["gradient_ramp_duration"] == pytest.approx(.002)
+    plot = pg.PlotWidget()
+    gui.render_full_ppg_schematic(plot, delay_scale="proportional")
+    ramp = next(curve for curve in plot.listDataItems() if curve.toolTip().startswith("Gx PPG expression:"))
+    assert "Ramp time: 2.000 ms" in ramp.toolTip()
+    assert np.ptp(ramp.getData()[0]) == pytest.approx(40)
+    plot.close()
+
+
+def test_full_ppg_keeps_centered_rf_pulses_on_both_channels(qapp: QtWidgets.QApplication) -> None:
+    gui = GUIapp.__new__(GUIapp)
+    gui.channels = []
+    gui.rfPulseCalibrations = []
+    gui.pulseProgramStructure = {
+        "records": [{
+            "source": "SvFreeGradRF.ppg", "line": 40, "text": "(center (p0 ph0):f1 (p1 ph1):f2)",
+        }],
+        "parameters": {"p0": .001, "p1": .002},
+    }
+    event, = gui.build_full_ppg_schematic_events()
+    assert event["rf_alignment"] == "center"
+    assert event["duration"] == pytest.approx(.002)
+    assert [p["rf_channel"] for p in event["rf_pulses"]] == [1, 2]
+    plot = pg.PlotWidget()
+    gui.render_full_ppg_schematic(plot, delay_scale="proportional")
+    rf = {c.toolTip().splitlines()[0]: c.getData()[0] for c in plot.listDataItems()
+          if c.toolTip().startswith("PPG RF pulse:")}
+    np.testing.assert_allclose(rf["PPG RF pulse: p0"][[0, -1]], [10, 30])
+    np.testing.assert_allclose(rf["PPG RF pulse: p1"][[0, -1]], [0, 40])
+    plot.close()
+
+
 def test_full_ppg_draws_every_ramp_after_gradient_variants_return_to_zero(qapp: QtWidgets.QApplication) -> None:
     gui = GUIapp.__new__(GUIapp)
     program = ["d4 grad_ramp{0, first, 0}", "d4 grad_off", "d4 grad_ramp{0, second, 0}"]

@@ -425,7 +425,7 @@ class InteractionMixin:
         for record in records:
             code = str(record.get("text", "")).partition(";")[0].strip()
             alias = re.match(
-                r"define\s+loopcounter\s+(\w+)\s*=\s*\{\s*\$?(\w+)\s*\}",
+                r"define\s+loopcounter\s+(\w+)\s*=\s*\{\s*\$?(\w+(?:\[\d+\])?)\s*\}",
                 code, re.IGNORECASE,
             )
             if alias:
@@ -445,7 +445,9 @@ class InteractionMixin:
                 if not re.fullmatch(r"ph\d+", name, re.IGNORECASE):
                     delay_aliases[name.casefold()] = expression.strip()
         loops = collect_ppg_loops(active_records, structure, loop_aliases)
-        frequency_offsets = ppg_frequency_offsets(active_records, loops, structure.get("frequency_lists_hz", {}))
+        frequency_offsets = ppg_frequency_offsets(
+            active_records, loops, structure.get("frequency_lists_hz", {}), structure, loop_aliases,
+        )
 
         def is_delay(token: str | None) -> bool:
             if token is None:
@@ -557,12 +559,15 @@ class InteractionMixin:
             label = label_match.group(1) if label_match else None
             duration_token = self.get_ppg_duration_token(text)
             subroutine_match = re.search(r"\bsubr\s+(\w+)", text, re.IGNORECASE)
+            rf_control = re.search(r"\b(cpd[s]?\d+|do)\s*:\s*f(\d+)\b", codes[record_index], re.IGNORECASE)
             if _PPG_GRADIENT_POINT.search(codes[record_index]) or re.search(r"\bgroff\b", codes[record_index], re.IGNORECASE):
                 kind = "gradient"
             elif re.search(r"\((?:\s*p\d+\b[^)]*|[^)]*:[^)]*)\)\s*:f\d", text, re.IGNORECASE):
                 kind = "rf"
             elif re.search(r"\b(?:aq|adc|dwgen)_[A-Za-z0-9_]+", text, re.IGNORECASE):
                 kind = "acquisition"
+            elif rf_control:
+                kind = "rf_control"
             elif subroutine_match:
                 # pulseprogram.precomp expands the called body immediately
                 # after this line. The call itself has no duration or physical
@@ -584,15 +589,31 @@ class InteractionMixin:
                 "internal_line": record.get("internal_line"),
             }
             if kind == "rf":
-                pulse_token = re.search(r"\(\s*([A-Za-z_]\w*)\b", text)
-                duration_token = pulse_token.group(1) if pulse_token else duration_token
-                rf_instruction = re.search(r"\(([^()]*)\)\s*:f(\d+)\b", text, re.IGNORECASE)
-                if rf_instruction:
-                    body, channel = rf_instruction.groups()
-                    fields = re.match(r"\s*\w+\s*(?::\s*(\w+))?\s*(\w+)?", body)
-                    shape, phase = fields.groups() if fields else (None, None)
-                    event.update(rf_shape=shape.lower() if shape else None, rf_channel=int(channel),
-                                 rf_phase=phase.lower() if phase else None)
+                pulses = []
+                for body, channel in re.findall(r"\(([^()]*)\)\s*:f(\d+)\b", codes[record_index], re.IGNORECASE):
+                    fields = re.match(r"\s*(\w+)\s*(?::\s*(\w+)\s*|(sp\w*)\s+)?(\w+)?", body, re.IGNORECASE)
+                    if fields:
+                        pulse_token, shape, shape_list, phase = fields.groups()
+                        shape = shape or shape_list
+                        pulses.append({
+                            **event, "duration_token": pulse_token,
+                            "duration": self.resolve_ppg_duration(pulse_token, delay_aliases),
+                            "rf_shape": shape.casefold() if shape else None, "rf_channel": int(channel),
+                            "rf_phase": phase.casefold() if phase else None,
+                        })
+                if pulses:
+                    event.update(pulses[0])
+                    duration_token = event["duration_token"]
+                if len(pulses) > 1:
+                    alignment = re.search(r"\(\s*(center|lalign|ralign)\b", codes[record_index], re.IGNORECASE)
+                    event.update(rf_pulses=pulses, rf_alignment=alignment[1].casefold() if alignment else "lalign")
+                    event["duration"] = max(pulse["duration"] or 0.0 for pulse in pulses) or None
+                    duration_token = None
+            elif kind == "rf_control":
+                event.update(rf_command=rf_control[1].casefold(), rf_channel=int(rf_control[2]))
+                if not is_delay(duration_token):
+                    duration_token = None
+                    event["duration"] = 0.0
             elif kind == "acquisition" and not duration_token:
                 explicit_delays = re.search(r"\)\s*\(([^)]*)\)", text)
                 if explicit_delays:
@@ -616,6 +637,25 @@ class InteractionMixin:
             if record_index in gcon_blocks:
                 event["gcon_control"] = gcon_blocks[record_index]
             if kind == "gradient":
+                instruction = re.search(
+                    r"\b(grad_(?:ramp|shape|off)|groff)\b(?:\s*<([^>]+)>)?(?:\s*\{([^}]*)\})?",
+                    codes[record_index], re.IGNORECASE,
+                )
+                command, options, body = instruction.groups()
+                event.update(
+                    gradient_command=command.casefold(),
+                    gradient_options=tuple(option.strip() for option in options.split(",")) if options else (),
+                    gradient_components=tuple(component.strip() for component in body.split(",")) if body else (),
+                )
+                if options and event["gradient_command"] in {"grad_ramp", "grad_off"}:
+                    qualifiers = ("magnet_coord", "rps_coord", "xyzb0", "shims")
+                    ramp_token = next(
+                        (option for option in event["gradient_options"] if option.casefold() not in qualifiers),
+                        None,
+                    )
+                    if ramp_token:
+                        event["gradient_ramp_token"] = ramp_token
+                        event["gradient_ramp_duration"] = self.resolve_ppg_duration(ramp_token, delay_aliases)
                 if re.match(r"(?:\w+\s*,\s*)?grad_ramp\b", text, re.IGNORECASE):
                     event["duration"] = 0.0
                 event["gradient_order"] = gradient_order
@@ -627,7 +667,7 @@ class InteractionMixin:
                     if point in waveforms and "grad_shape" in lowered:
                         event["compiled_gradient_samples"] = waveforms[point]
                     if not polarity_varies and _PPG_POLARITY_LIST.search(codes[record_index]):
-                        self.select_fixed_ppg_gradient_polarity(event, codes[record_index])
+                        self.select_fixed_ppg_gradient_polarity(event)
             if record_index in frequency_offsets:
                 event["frequency_offsets"] = frequency_offsets[record_index]
             if kind in {"acquisition", "gradient"}:
@@ -642,12 +682,9 @@ class InteractionMixin:
         return self.annotate_ppg_gradient_variants(events, active_records, structure.get("parameters", {}))
 
     @staticmethod
-    def select_fixed_ppg_gradient_polarity(event: dict, code: str) -> None:
+    def select_fixed_ppg_gradient_polarity(event: dict) -> None:
         """Keep the initial plusminus entry on axes with a compiled polarity pair."""
-        match = re.search(r"\{([^}]*)\}", code)
-        if match is None:
-            return
-        components = match[1].split(",")
+        components = event["gradient_components"]
         if len(components) not in {3, 4}:
             return
         axes = [axis for axis, component in enumerate(components[:3]) if _PPG_POLARITY_LIST.search(component)]
@@ -785,17 +822,51 @@ class InteractionMixin:
 
     def evaluate_ppg_condition(self, expression: str, parameters: dict) -> bool | None:
         expression = expression.strip()
-        unary = re.fullmatch(r"!?\s*([A-Za-z_]\w*)", expression)
+        depth = 0
+        first_closing = None
+        operators = {}
+        for token in re.finditer(r"\(|\)|\|\||&&", expression):
+            if token[0] == "(":
+                depth += 1
+            elif token[0] == ")":
+                depth -= 1
+                if depth < 0:
+                    return None
+                if depth == 0 and first_closing is None:
+                    first_closing = token.end()
+            elif depth == 0:
+                operators.setdefault(token[0], token)
+        if depth:
+            return None
+        if operator := operators.get("||", operators.get("&&")):
+            decisive = operator[0] == "||"
+            left = self.evaluate_ppg_condition(expression[:operator.start()], parameters)
+            if left is decisive:
+                return decisive
+            right = self.evaluate_ppg_condition(expression[operator.end():], parameters)
+            if right is decisive:
+                return decisive
+            return None if left is None or right is None else not decisive
+        if expression.startswith("(") and first_closing == len(expression):
+            return self.evaluate_ppg_condition(expression[1:-1], parameters)
+        if expression.startswith("!"):
+            value = self.evaluate_ppg_condition(expression[1:], parameters)
+            return None if value is None else not value
+        unary = re.fullmatch(r"([A-Za-z_]\w*)", expression)
         if unary and unary.group(1) in parameters:
             value = parameters[unary.group(1)]
             enabled = str(value).strip("<> ").lower() not in {
                 "", "0", "0.0", "off", "no", "false", "none",
             }
-            return not enabled if expression.lstrip().startswith("!") else enabled
-        match = re.search(r"([A-Za-z_]\w*)\s*(==|!=|>=|<=|>|<)\s*([A-Za-z_]\w*|[-+]?\d+(?:\.\d+)?)", expression)
+            return enabled
+        match = re.fullmatch(
+            rf"([A-Za-z_]\w*)\s*(==|!=|[<>](?:\s*=)?)\s*([A-Za-z_]\w*|[-+]?{_PPG_NUMBER})",
+            expression,
+        )
         if not match:
             return None
         left_name, operator, right_token = match.groups()
+        operator = re.sub(r"\s+", "", operator)
         if left_name not in parameters:
             return None
         left = parameters[left_name]
@@ -1069,16 +1140,19 @@ class InteractionMixin:
         for event in events:
             if event["kind"] != "rf":
                 continue
-            event["compiled_rf"] = compiled_rf_shape(event, structure)
-            if event["compiled_rf"] is not None:
-                shape = event["compiled_rf"][1]
-                if not event.get("duration"):
-                    event["duration"] = shape["duration"]
-                if offset := shape.get("offset_hz"):
-                    frequency = ("Shape", f"f{event['rf_channel']}", event["rf_shape"], offset, offset)
-                    event.setdefault("frequency_offsets", []).append(frequency)
-            if event["compiled_rf"] is None or event["compiled_rf"][1]["phase"] is None:
-                recorded_candidates.append(event)
+            for pulse in event.get("rf_pulses", (event,)):
+                pulse["compiled_rf"] = compiled_rf_shape(pulse, structure)
+                if pulse["compiled_rf"] is not None:
+                    shape = pulse["compiled_rf"][1]
+                    if not pulse.get("duration"):
+                        pulse["duration"] = shape["duration"]
+                    if offset := shape.get("offset_hz"):
+                        frequency = ("Shape", f"f{pulse['rf_channel']}", pulse["rf_shape"], offset, offset)
+                        event.setdefault("frequency_offsets", []).append(frequency)
+                if pulse is event and (pulse["compiled_rf"] is None or pulse["compiled_rf"][1]["phase"] is None):
+                    recorded_candidates.append(pulse)
+            if "rf_pulses" in event:
+                event["duration"] = max(pulse.get("duration") or 0.0 for pulse in event["rf_pulses"]) or None
         recorded_rf = recorded_rf_envelopes(
             recorded_candidates, self.__dict__.get("pulseProgramTimeline"),
             schematic_rf_channels(getattr(self, "channels", [])) if recorded_candidates else {},
@@ -1092,7 +1166,7 @@ class InteractionMixin:
         plot.setLabel("bottom", f"Pulse-program order · {delay_scale} idle delays")
         widths = {
             "rf": 1.0, "gradient": 1.0, "acquisition": 1.0, "epi_readout": 1.0,
-            "subroutine": 0.0, "delay": 0.15, "flow": 0.0, "loop": 0.0, "frequency": 0.0,
+            "subroutine": 0.0, "delay": 0.15, "rf_control": 0.15, "flow": 0.0, "loop": 0.0, "frequency": 0.0,
         }
         display_edges = [0.0]
         physical_edges = [0.0]
@@ -1105,9 +1179,9 @@ class InteractionMixin:
             duration = event.get("duration")
             event_width = widths[kind]
             is_control = event["record_index"] in parallel_controls
-            idle_delay = (kind == "delay" and not is_control) or (kind == "loop" and bool(token))
+            idle_delay = (kind in {"delay", "rf_control"} and not is_control) or (kind == "loop" and bool(token))
             if token and kind != "rf" and not _PPG_TIME.fullmatch(token):
-                if kind == "delay" or duration is not None:
+                if kind in {"delay", "rf_control"} or duration is not None:
                     delay_lengths.setdefault(token.casefold(), duration)
             if isinstance(duration, (int, float)) and duration > 0:
                 linear_width = duration / _PPG_SECONDS_PER_UNIT
@@ -1117,7 +1191,7 @@ class InteractionMixin:
                     event_width = max(0.08, 8.0 * linear_width / (8.0 + linear_width))
                 else:
                     event_width = linear_width
-            elif kind == "delay" and duration == 0 and token and _PPG_TIME.fullmatch(token):
+            elif duration == 0 and (kind == "rf_control" or kind == "delay" and token and _PPG_TIME.fullmatch(token)):
                 event_width = 0.0
             elif duration == 0 and (kind == "gradient" or parallel_controls):
                 event_width = 0.0
@@ -1182,7 +1256,7 @@ class InteractionMixin:
             token = event.get("duration_token")
             duration = event.get("duration")
             gradient_timing = kind == "gradient" and duration is not None
-            if right > left and (gradient_timing or kind == "delay" or (kind == "loop" and token)):
+            if right > left and (gradient_timing or kind in {"delay", "rf_control"} or (kind == "loop" and token)):
                 length = self.format_ppg_duration(duration)
                 timing_name = "gradient" if gradient_timing else "delay"
                 color = "#1d4ed8" if gradient_timing else "#4b5563"
@@ -1225,14 +1299,28 @@ class InteractionMixin:
                         if state is None:
                             hold.setToolTip("Gradient hold: amplitude unresolved. Dashed trace is a placeholder.")
             if kind == "rf":
-                caption = token or f"RF line {event['line']}"
-                rf_color = self.render_ppg_rf_pulse(
-                    plot, event, left, right, caption, recorded_rf.get(event.get("internal_line")), placeholder_pen,
-                    rf_lane=lanes.get("RF"), phase_lane=lanes.get("RF phase"),
-                )
-                label = f"{caption} · {self.format_ppg_duration(duration)}"
-                if event["compiled_rf"] is not None and (size := event["compiled_rf"][1].get("schedule_size", 0)) > 1:
-                    label += f" · {size} shapes"
+                pulses = event.get("rf_pulses", (event,))
+                alignment = {"center": .5, "ralign": 1.0}.get(event.get("rf_alignment"), 0.0)
+                labels = []
+                for pulse in pulses:
+                    caption = pulse.get("duration_token") or f"RF line {event['line']}"
+                    pulse_duration = pulse.get("duration")
+                    pulse_left, pulse_right = left, right
+                    if pulse is not event and pulse_duration is not None:
+                        inset = alignment * (physical_end - physical_start - pulse_duration)
+                        pulse_left, pulse_right = map(float, display_time(
+                            [physical_start + inset, physical_start + inset + pulse_duration],
+                        ))
+                    rf_color = self.render_ppg_rf_pulse(
+                        plot, pulse, pulse_left, pulse_right, caption,
+                        recorded_rf.get(event.get("internal_line")) if pulse is event else None, placeholder_pen,
+                        rf_lane=lanes.get("RF"), phase_lane=lanes.get("RF phase"),
+                    )
+                    label = f"{caption} · {self.format_ppg_duration(pulse_duration)}"
+                    if pulse["compiled_rf"] is not None and (size := pulse["compiled_rf"][1].get("schedule_size", 0)) > 1:
+                        label += f" · {size} shapes"
+                    labels.append(label)
+                label = " / ".join(labels)
                 label_left, label_right, anchor = label_position(label, center)
                 if "RF" in lanes and label_left > rf_label_end:
                     item = pg.TextItem(label, color=rf_color, anchor=(anchor, 1.0))
@@ -1269,10 +1357,12 @@ class InteractionMixin:
                         plot, event, left, right, profile, gradient_states, gradient_colors, lanes,
                     )
                     continue
-                component_match = re.search(r"\{([^}]*)\}", text)
-                components = [part.strip() for part in component_match.group(1).split(",")] if component_match else []
-                gradient_off = bool(re.search(r"\b(?:grad_off|groff)\b", text, re.IGNORECASE))
-                shaped = bool(re.search(r"\bgrad_shape\b", text, re.IGNORECASE))
+                components = event["gradient_components"]
+                gradient_options = {option.casefold() for option in event["gradient_options"]}
+                if "xyzb0" in gradient_options and len(components) == 4:
+                    components = components[:3]
+                gradient_off = event["gradient_command"] in {"grad_off", "groff"}
+                shaped = event["gradient_command"] == "grad_shape"
                 compiled_target = event.get("compiled_ramped_target")
                 phase_indices = event.get("phase_encode_indices", [0])
                 indexed_lists = event.get("indexed_gradient_lists", ())
@@ -1311,7 +1401,7 @@ class InteractionMixin:
                         index for index, targets in enumerate(compiled_values)
                         if any(targets) or any(state is None or abs(state) > 1e-12 for state in gradient_states[index])
                     ]
-                elif "magnet_coord" in text or "rps_coord" in text or len(components) != 3:
+                elif gradient_options & {"magnet_coord", "rps_coord"} or len(components) != 3:
                     active_axes = range(3)
                 else:
                     active_axes = [
@@ -1345,14 +1435,19 @@ class InteractionMixin:
                             )
                     ramps = getattr(self, "pulseProgramStructure", {}).get("gradient_ramps", [])
                     ramp = np.asarray(ramps[axis_index], dtype=float) if axis_index < len(ramps) else np.asarray([])
-                    ramp_placeholder = ramp.size < 2 or shape_unavailable
+                    explicit_ramp = event.get("gradient_ramp_duration")
+                    ramp_placeholder = (
+                        ramp.size < 2 or shape_unavailable
+                        or ("gradient_ramp_token" in event and explicit_ramp is None)
+                    )
                     if ramp_placeholder:
                         ramp = np.asarray([0.0, 1.0])
                     ramp_durations = getattr(self, "pulseProgramStructure", {}).get("gradient_ramp_durations", [])
-                    ramp_duration = (
+                    default_ramp = (
                         float(ramp_durations[axis_index]) if axis_index < len(ramp_durations)
                         else physical_end - physical_start
                     )
+                    ramp_duration = default_ramp if explicit_ramp is None else explicit_ramp
                     start_time = physical_start
                     end_time = min(start_time + ramp_duration, next_gradient_times[index])
                     sample_times = np.linspace(start_time, start_time + ramp_duration, ramp.size)
@@ -1824,7 +1919,9 @@ class InteractionMixin:
         structure = getattr(self, "pulseProgramStructure", {})
         parameters = structure.get("parameters", {})
         ramp_times = structure.get("gradient_ramp_durations", [])
-        ramp_time = ramp_times[axis_index] if axis_index < len(ramp_times) else None
+        ramp_time = event.get(
+            "gradient_ramp_duration", ramp_times[axis_index] if axis_index < len(ramp_times) else None,
+        )
         referenced = []
         for name in dict.fromkeys(re.findall(r"[A-Za-z_]\w*", component)):
             if name in parameters:

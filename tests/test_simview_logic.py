@@ -1063,6 +1063,63 @@ def test_ppg_condition_resolves_paravision_diffusion_mode_enum(app_logic: GUIapp
     assert app_logic.evaluate_ppg_condition("PVM_DiffPrepMode == 1", parameters) is False
 
 
+@pytest.mark.parametrize(("condition", "expected"), [
+    ("(Evolution == On) && (ScanType == Scan_Experiment)", False),
+    ("(Evolution == On) && (Missing == On)", None),
+    ("(Evolution != On) && (Missing == On)", False),
+    ("Missing == On || Evolution == On && ScanType != Scan_Experiment", True),
+    ("!(Evolution == On || ScanType == Scan_Experiment)", False),
+    ("lds> = 0", True),
+    ("Evolution == On + Unexpected", None),
+])
+def test_ppg_evaluates_complete_conditions(app_logic: GUIapp, condition: str, expected: bool | None) -> None:
+    parameters = {"Evolution": "On", "ScanType": "Scan_Adjustment", "lds": 0}
+    assert app_logic.evaluate_ppg_condition(condition, parameters) is expected
+
+
+def test_full_ppg_resolves_indexed_loop_aliases_and_frequency_cursor(app_logic: GUIapp) -> None:
+    program = [
+        "define loopcounter nSlices = {$PVM_SPackArrNSlices[0]}",
+        "slice, 10u freqTx:f1",
+        "0u freqTx.inc",
+        "lo to slice times nSlices",
+        '"freqTx.idx = freqTx.idx - nSlices"',
+        "10u freqTx:f1",
+        "freqTx.dec",
+        "10u freqTx:f1",
+    ]
+    app_logic.pulseProgramStructure = {
+        "records": [{"source": "gradMap.ppg", "line": i, "text": line} for i, line in enumerate(program)],
+        "parameters": {"PVM_SPackArrNSlices": [2, 6]},
+        "frequency_lists_hz": {"freqtx": np.array([11., 22., 33.])},
+    }
+    events = app_logic.build_full_ppg_schematic_events()
+    assert next(event["count"] for event in events if event["kind"] == "loop") == 2
+    assert [event["frequency_offsets"][0][3:] for event in events if "frequency_offsets" in event] == [
+        (11., 22.), (11., 11.), (33., 33.),
+    ]
+
+
+def test_full_ppg_preserves_vector_b0_and_decoupling_operands(app_logic: GUIapp) -> None:
+    lines = [
+        "d2 grad_ramp<magnet_coord>{100*direction[]}",
+        "d1 grad_shape<xyzb0, rps_coord>{Read(),Phase(),Slice(),Field()}",
+        "d2 cpds1:f2", "d1 do:f2",
+    ]
+    app_logic.pulseProgramStructure = {
+        "records": [{"source": "demo.ppg", "line": i, "text": line} for i, line in enumerate(lines)],
+        "parameters": {"d1": .001, "d2": .002},
+    }
+    vector, shape, start, stop = app_logic.build_full_ppg_schematic_events()
+    assert vector["gradient_options"] == ("magnet_coord",)
+    assert vector["gradient_components"] == ("100*direction[]",)
+    assert shape["gradient_options"] == ("xyzb0", "rps_coord")
+    assert shape["gradient_components"] == ("Read()", "Phase()", "Slice()", "Field()")
+    assert [(e["kind"], e["rf_command"], e["rf_channel"], e["duration"]) for e in (start, stop)] == [
+        ("rf_control", "cpds1", 2, .002), ("rf_control", "do", 2, .001),
+    ]
+
+
 def test_get_rf_events_captures_all_given_event_attributes() -> None:
     pulse_program = {
         "pulseprogram": {

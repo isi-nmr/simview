@@ -7,29 +7,52 @@ import numpy as np
 
 
 def resolve_loop_count(token: str, structure: dict, aliases: dict[str, str]) -> int | str:
+    parameters = structure.get("parameters", {})
     for name in (token, aliases.get(token, token)):
-        value = structure.get("loop_values", {}).get(name, structure.get("parameters", {}).get(name, name))
+        value = structure.get("loop_values", {}).get(name, parameters.get(name, name))
+        if indexed := re.fullmatch(r"(\w+)\[(\d+)\]", name):
+            values = parameters.get(indexed[1])
+            index = int(indexed[2])
+            if isinstance(values, list) and index < len(values):
+                value = values[index]
         if isinstance(value, int) or isinstance(value, float) and value.is_integer():
             return int(value)
-        if isinstance(value, str) and re.fullmatch(r"\d+", value):
+        if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value):
             return int(value)
     return aliases.get(token, token)
 
 
 def ppg_frequency_offsets(
     records: list[dict], loops: dict[int, dict], lists: dict[str, np.ndarray],
+    structure: dict, aliases: dict[str, str],
 ) -> dict[int, list[tuple[str, str, str, float, float]]]:
     """Find programmed Tx/Rx list offsets at their use sites and in counted loops."""
     if not lists:
         return {}
 
     codes = [str(record["text"]).partition(";")[0] for record in records]
-    operations = [
-        [(name.casefold(), operation.lower()) for name, operation in re.findall(
-            r"\b(\w+)\.(inc|res|store|restore)\b", code, re.IGNORECASE,
-        ) if name.casefold() in lists]
-        for code in codes
-    ]
+    operations = []
+    for code in codes:
+        changes = [
+            (name.casefold(), operation.lower(), 1 if operation.lower() == "inc" else -1)
+            for name, operation in re.findall(r"\b(\w+)\.(inc|dec|res|store|restore)\b", code, re.IGNORECASE)
+            if name.casefold() in lists
+        ]
+        assignment = re.fullmatch(
+            r'"\s*(\w+)\.idx\s*=\s*(?:(\w+)\.idx\s*([+-])\s*)?([+-]?\d+|\w+(?:\[\d+\])?)\s*"',
+            code.strip(), re.IGNORECASE,
+        )
+        if assignment:
+            destination, source, sign, operand = assignment.groups()
+            name = destination.casefold()
+            if name in lists and (source is None or source.casefold() == name):
+                value = resolve_loop_count(operand, structure, aliases)
+                if isinstance(value, int):
+                    if source is None:
+                        changes.append((name, "set", value))
+                    else:
+                        changes.append((name, "inc", -value if sign == "-" else value))
+        operations.append(changes)
     strides = {}
     for end, loop in loops.items():
         start = loop.get("start_record_index")
@@ -39,10 +62,10 @@ def ppg_frequency_offsets(
         advances = {}
         resets = set()
         for index in range(start, end):
-            for name, operation in operations[index]:
-                if operation == "inc":
-                    advances[name] = advances.get(name, 0) + 1
-                elif operation in {"res", "restore"}:
+            for name, operation, amount in operations[index]:
+                if operation in {"inc", "dec"}:
+                    advances[name] = advances.get(name, 0) + amount
+                elif operation in {"res", "restore", "set"}:
                     resets.add(name)
             for name, stride in strides.get(index, {}).items():
                 advances[name] = advances.get(name, 0) + stride * (loops[index]["count"] - 1)
@@ -72,11 +95,13 @@ def ppg_frequency_offsets(
             offsets.setdefault(index, []).append(
                 ("Rx" if receive else "Tx", f"f{channel}", symbol, float(np.min(selected)), float(np.max(selected))),
             )
-        for name, operation in operations[index]:
-            if operation == "inc":
-                cursors[name] += 1
+        for name, operation, amount in operations[index]:
+            if operation in {"inc", "dec"}:
+                cursors[name] += amount
             elif operation == "res":
                 cursors[name] = 0
+            elif operation == "set":
+                cursors[name] = amount
             elif operation == "store":
                 saved[name] = cursors[name]
             else:
